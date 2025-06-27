@@ -4,7 +4,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from custom_callbacks import CustomLoggingCallback
 
-env_name = "vel_point"  # "point" "lidar"
+env_name = "car"  # "point" "lidar" "car" "vel_point"
 
 
 def train():

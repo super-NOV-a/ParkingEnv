@@ -30,7 +30,7 @@ class PointEnv(gym.Env):
         self.target_threshold = 0.05  # 到达目标的距离阈值
 
         # 雷达扫描参数
-        self.radar_beams = 36  # 36个方向（每10度一个）
+        self.radar_beams = 360  # 36个方向（每1度一个）
         self.max_detection_distance = 2.0  # 最大探测距离（环境对角线约为2.828）
         self.obstacle_radius = 0.05  # 障碍物半径
         self.agent_radius = 0.01  # 智能体半径

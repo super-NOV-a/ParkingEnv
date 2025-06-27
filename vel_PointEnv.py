@@ -93,8 +93,7 @@ class PointEnv(gym.Env):
 
         # 重置步数计数器
         self.current_step = 0
-        self.last_action = np.zeros(2)
-        # self._update_level()
+        self._update_level()
         self.current_points = int(self.min_points + (self.max_points - self.min_points) *
                                   (self.curriculum_level / self.max_level))
 
@@ -151,6 +150,7 @@ class PointEnv(gym.Env):
 
         # 计算初始最近障碍物
         self._update_nearest_obstacle()
+        self.last_action = np.zeros(2)
 
         return self._get_obs(), {}
 
@@ -242,11 +242,9 @@ class PointEnv(gym.Env):
                 "l": self.current_step,  # 回合长度
                 "curriculum_level": self.curriculum_level
             }
-
-        _obs = self._get_obs()
         self.last_action = action
 
-        return _obs, self.reward, terminated, truncated, info
+        return self._get_obs(), self.reward, terminated, truncated, info
 
     def _update_nearest_obstacle(self):
         """更新最近障碍物的位置和距离倒数归一化值"""

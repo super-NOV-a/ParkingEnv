@@ -7,11 +7,20 @@ def make_env(rank: int, render_mode=None, env_name="point"):
     def _init():
         if env_name == "point":
             from PointEnv import PointEnv
+            env = PointEnv(render_mode=render_mode if rank == 0 else None)
+
         elif env_name == "vel_point":
             from vel_PointEnv import PointEnv
-        env = PointEnv(render_mode=render_mode if rank == 0 else None)
-        return env
+            env = PointEnv(render_mode=render_mode if rank == 0 else None)
 
+        elif env_name == "car":
+            from CarEnv import CarEnv
+            env = CarEnv(render_mode=render_mode if rank == 0 else None)
+
+        else:
+            raise AssertionError("--parallel_wrap.py中没找到该环境")
+
+        return env
     return _init
 
 
