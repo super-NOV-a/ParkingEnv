@@ -39,11 +39,11 @@ class CarEnv(gym.Env):
         self.min_level = 0
 
         # 车辆物理参数
-        self.max_acceleration = 0.5  # 最大加速度
-        self.max_steering_vel = 1.0  # 最大转向角速度 (rad/s)
+        self.max_acceleration = 0.2  # 最大加速度
+        self.max_steering_vel = 0.3  # 最大转向角速度 (rad/s)
         self.max_steering_angle = np.pi / 6  # 最大前轮转角 (30度)
         self.dt = 0.1  # 时间步长
-        self.max_velocity = 0.5  # 最大速度
+        self.max_velocity = 0.2  # 最大速度     0.2在[-1,1]中对应30m的3m/s
         self.max_angular_velocity = 1.0  # 最大角速度 (rad/s)
         self.vehicle_length = 0.1  # 车辆长度
         self.vehicle_width = 0.05  # 车辆宽度
@@ -63,7 +63,8 @@ class CarEnv(gym.Env):
         )
 
         # 观测空间设计 (所有值都在[-1,1]范围内)
-        obs_shape = 8 + 3 * self.max_points + 3  # 车辆状态6 + last动作2 + 障碍物信息 + 目标信息
+        # 修改后观测空间: 1朝向 + 2车身速度(纵向,横向) + 1偏转角 + 2上一动作 + 障碍物信息 + 3目标信息(车身系x,y,距离)
+        obs_shape = 1 + 2 + 1 + 2 + 3 * self.max_points + 3
         self.observation_space = spaces.Box(
             low=-1.0,
             high=1.0,
@@ -94,6 +95,15 @@ class CarEnv(gym.Env):
         # 环境状态初始化
         self.reset()
 
+    def _global_to_body_frame(self, vector: np.ndarray) -> np.ndarray:
+        """将全局坐标系向量转换到车身坐标系"""
+        heading = self.agent_heading
+        rotation_matrix = np.array([
+            [np.cos(heading), np.sin(heading)],
+            [-np.sin(heading), np.cos(heading)]
+        ])
+        return rotation_matrix @ vector
+
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         super().reset(seed=seed)
 
@@ -121,30 +131,17 @@ class CarEnv(gym.Env):
         for i in range(self.current_points):
             point = self.np_random.uniform(self.low + 0.05, self.high - 0.05, size=2)
             self.obstacle_abs_positions.append(point)
-            relative_vector = point - self.agent_pos
-            dist = np.linalg.norm(relative_vector)
-            dist_T = 2 / (dist + 0.5) - 1  # 映射到[-1,1]
-            self.points_vector[i] = [relative_vector[0], relative_vector[1], dist_T]
 
         # 填充无效点（角点）
         for i in range(self.current_points, self.max_points):
             corner = self.corner_points[i % len(self.corner_points)]
             self.obstacle_abs_positions.append(corner)
-            relative_vector = corner - self.agent_pos
-            self.points_vector[i] = [relative_vector[0], relative_vector[1], -1.0]  # 距离倒数设为-1
 
         # 重置目标位置
         self.target = self.np_random.uniform(self.low + 0.1, self.high - 0.1, size=2)
         # 确保目标不与车辆初始位置太近
         while np.linalg.norm(self.target - self.agent_pos) < 0.3:
             self.target = self.np_random.uniform(self.low + 0.1, self.high - 0.1, size=2)
-
-        # 计算目标向量-reset
-        relative_target_vector = self.target - self.agent_pos
-        self.target_distance = np.linalg.norm(relative_target_vector)
-        relative_target_vector = relative_target_vector / self.target_distance  # 前两维使用方向向量而不是距离向量
-        target_dist_T = 3 / (self.target_distance + 1) - 2  # target_dist范围[0, 2]   -》   映射到[-1,1]
-        self.target_vector = np.array([relative_target_vector[0], relative_target_vector[1], target_dist_T])
 
         # 重置距离记录
         self.min_distance = float('inf')
@@ -213,24 +210,9 @@ class CarEnv(gym.Env):
         # 更新步数计数器
         self.current_step += 1
 
-        # 更新所有点的相对向量和距离倒数
-        for i in range(self.max_points):
-            relative_vector = self.obstacle_abs_positions[i] - self.agent_pos
-            self.points_vector[i, 0] = relative_vector[0]
-            self.points_vector[i, 1] = relative_vector[1]
-
-            # 只更新有效点的距离倒数
-            if i < self.current_points:
-                dist = np.linalg.norm(relative_vector)
-                dist_T = 2 / (dist + 0.5) - 1
-                self.points_vector[i, 2] = dist_T
-
-        # 更新目标向量-step
-        relative_target_vector = self.target - self.agent_pos
-        self.target_distance = np.linalg.norm(relative_target_vector)
-        relative_target_vector = relative_target_vector / self.target_distance  # 前两维使用方向向量而不是距离向量
-        target_dist_T = 3 / (self.target_distance + 1) - 2
-        self.target_vector = np.array([relative_target_vector[0], relative_target_vector[1], target_dist_T])
+        # 更新目标距离
+        relative_target_vector_global = self.target - self.agent_pos
+        self.target_distance = np.linalg.norm(relative_target_vector_global)
 
         # 更新最近障碍物
         self._update_nearest_obstacle()
@@ -240,7 +222,7 @@ class CarEnv(gym.Env):
         self.total_reward += self.reward
 
         # 检查终止条件
-        terminated = False # self.target_distance < self.target_threshold
+        terminated = False  # self.target_distance < self.target_threshold
         truncated = self.current_step >= self.max_steps
 
         # 收集额外信息
@@ -287,73 +269,63 @@ class CarEnv(gym.Env):
         norm_target_dist = self.target_distance / MAX_DIST
         target_reward = 2 * np.exp(-3.0 * norm_target_dist) - 1  # 5 * np.exp(-20 * norm_target_dist) - 1
 
-        # # 障碍物惩罚 (安全约束)
-        # safe_radius = 0.15
-        # collision_radius = 0.05
-        # if self.min_distance < safe_radius:
-        #     norm_dist = max(0, (self.min_distance - collision_radius)) / (safe_radius - collision_radius)
-        #     obstacle_penalty = -1.0 * (1 - norm_dist) ** 2
-        # else:
-        #     obstacle_penalty = 0.0
-        #
-        # # 成功奖励
-        # success_bonus = 10.0 if self.target_distance < self.target_threshold else 0.0
-        #
-        # # 时间惩罚 (鼓励高效)
-        # time_penalty = -0.01
-        #
-        # # 边界碰撞惩罚
-        # boundary_penalty = -1.0 if boundary_collision else 0.0
-        #
-        # # 速度奖励 (鼓励移动)
-        # speed_reward = 0.1 * np.linalg.norm(self.agent_vel) / self.max_velocity
-        #
-        # # 方向奖励 (鼓励朝向目标)
-        # target_dir = self.target - self.agent_pos
-        # if np.linalg.norm(target_dir) > 0.01:
-        #     target_angle = np.arctan2(target_dir[1], target_dir[0])
-        #     angle_diff = abs((self.agent_heading - target_angle + np.pi) % (2 * np.pi) - np.pi)
-        #     alignment_reward = 0.1 * (1 - angle_diff / np.pi)
-        # else:
-        #     alignment_reward = 0.0
-
         # 组合奖励
-        total_reward = (
-                target_reward +
-                # obstacle_penalty +
-                # success_bonus +
-                # time_penalty +
-                # boundary_penalty +
-                # speed_reward +
-                # alignment_reward +
-                0
-        )
+        total_reward = target_reward
 
         return float(np.clip(total_reward, -2.0, 10.0))
 
     def _get_obs(self) -> np.ndarray:
         """构建观测向量 (所有值在[-1,1]范围内)"""
         # 车辆状态 (归一化)
-        norm_pos = self.agent_pos  # 位置已在[-1,1]内
         norm_heading = self.agent_heading / np.pi - 1  # [0, 2π] -> [-1,1]
-        norm_vel = self.agent_vel / self.max_velocity  # 速度归一化
+
+        # 将速度转换到车身坐标系
+        body_vel = self._global_to_body_frame(self.agent_vel)
+        norm_longitudinal_vel = body_vel[0] / self.max_velocity
+        norm_lateral_vel = body_vel[1] / self.max_velocity
+
         norm_steering = self.steering_angle / self.max_steering_angle  # 转向角归一化
 
-        # 障碍物信息 (已归一化)
-        points_flat = self.points_vector.flatten()
+        # 障碍物信息 (转换到车身坐标系)
+        points_vector_body = np.zeros((self.max_points, 3), dtype=np.float32)
+        for i in range(self.max_points):
+            # 全局坐标系下的相对向量
+            global_vec = self.obstacle_abs_positions[i] - self.agent_pos
+            # 转换到车身坐标系
+            body_vec = self._global_to_body_frame(global_vec)
+            dist = np.linalg.norm(global_vec)
 
-        # 目标信息 (已归一化)
-        target_vec = self.target_vector
+            # 归一化处理
+            norm_x = body_vec[0] / 2.0  # 最大可能值2.0 (从-1到1)
+            norm_y = body_vec[1] / 2.0
+            dist_T = 2 / (dist + 0.5) - 1  # 映射到[-1,1]
+
+            points_vector_body[i] = [norm_x, norm_y, dist_T]
+
+        points_flat = points_vector_body.flatten()
+
+        # 目标信息 (转换到车身坐标系)
+        relative_target_global = self.target - self.agent_pos
+        relative_target_body = self._global_to_body_frame(relative_target_global)
+        self.target_distance = np.linalg.norm(relative_target_global)
+        relative_target_body = relative_target_body / self.target_distance  # 前两维使用方向向量
+
+        # 归一化处理
+        norm_target_x = relative_target_body[0]
+        norm_target_y = relative_target_body[1]
+        target_dist_T = 3 / (self.target_distance + 1) - 2  # 映射到[-1,1]
 
         # 拼接所有观测
         return np.concatenate([
-            norm_pos,           # 2
-            [norm_heading],     # 1
-            norm_vel,           # 2
-            [norm_steering],    # 1
-            self.last_action,   # 2
-            points_flat,    # 30*3
-            target_vec      # 3
+            [norm_heading],  # 1: 车辆朝向
+            [norm_longitudinal_vel,  # 2: 纵向速度
+             norm_lateral_vel],  # 横向速度
+            [norm_steering],  # 1: 偏转角
+            self.last_action,  # 2: 上一动作
+            points_flat,  # max_points*3: 障碍物信息 (车身坐标系)
+            [norm_target_x,  # 3: 目标在车身坐标系的x位置
+             norm_target_y,  # 目标在车身坐标系的y位置
+             target_dist_T]  # 目标距离归一化
         ], dtype=np.float32)
 
     def _get_vehicle_corners(self):
@@ -416,6 +388,12 @@ class CarEnv(gym.Env):
         pygame.draw.line(self.screen, (255, 0, 255), to_screen(self.agent_pos), to_screen((wheel_end_x, wheel_end_y)),
                          2)
 
+        # 绘制车身坐标系
+        body_x_end = self.agent_pos + 0.1 * np.array([np.cos(self.agent_heading), np.sin(self.agent_heading)])
+        body_y_end = self.agent_pos + 0.1 * np.array([-np.sin(self.agent_heading), np.cos(self.agent_heading)])
+        pygame.draw.line(self.screen, (255, 0, 0), to_screen(self.agent_pos), to_screen(body_x_end), 2)  # 红色: 车头方向
+        pygame.draw.line(self.screen, (0, 255, 0), to_screen(self.agent_pos), to_screen(body_y_end), 2)  # 绿色: 左侧方向
+
         # 显示信息
         texts = [
             f"Level: {self.curriculum_level}/{self.max_level}",
@@ -423,7 +401,9 @@ class CarEnv(gym.Env):
             f"Steps: {self.current_step}/{self.max_steps}",
             f"Reward: {self.reward:.2f}",
             f"Speed: {np.linalg.norm(self.agent_vel):.2f}/{self.max_velocity:.2f}",
-            f"Steering: {np.degrees(self.steering_angle):.1f}°"
+            f"Steering: {np.degrees(self.steering_angle):.1f}°",
+            f"Long Vel: {self._global_to_body_frame(self.agent_vel)[0]:.3f}",
+            f"Lat Vel: {self._global_to_body_frame(self.agent_vel)[1]:.3f}"
         ]
 
         for i, text in enumerate(texts):
@@ -460,6 +440,8 @@ if __name__ == "__main__":
 
         action = np.array([acceleration, steering])
         obs, reward, terminated, truncated, _ = env.step(action)
+        print("状态:1朝向", obs[:1], "、2车身速度(纵向,横向)", obs[1:3], "、1偏转角", obs[3:4], "、2上一动作", obs[4:6])
+        print("目标:车身系x,y", obs[-3:-1], "、距离归一化", obs[-1])
         env.render()
 
         if terminated or truncated:

@@ -1,15 +1,15 @@
 import multiprocessing
 from parallel_wrap import make_parallel_envs
-from stable_baselines3 import PPO
+from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
 from custom_callbacks import CustomLoggingCallback
 
-env_name = "car"  # "point" "lidar" "car" "vel_point"
+env_name = "lidar_car"  # "point" "lidar" "car" "vel_point"
 
 
 def train():
     # 创建并行环境 (8个并行)
-    env = make_parallel_envs(num_envs=7, env_name=env_name)
+    env = make_parallel_envs(num_envs=6, env_name=env_name)
 
     # 创建PPO模型
     model = PPO(
@@ -24,15 +24,15 @@ def train():
         gamma=0.99,
         gae_lambda=0.95,
         ent_coef=0.01,
-        learning_rate=1e-3,
+        learning_rate=2e-3,
         clip_range=0.2,
         n_epochs=10,
         vf_coef=0.5
     )
 
-    # 每10000步保存一次模型
+    # 每x步保存一次模型
     checkpoint_callback = CheckpointCallback(
-        save_freq=20000,
+        save_freq=30000,
         save_path="./"+env_name+"_env_models/",
         name_prefix="rl_"+env_name+"_model"
     )
@@ -52,7 +52,7 @@ def train():
     )
 
     # 保存最终模型
-    model.save("final_model/ppo_" + env_name + "_env_final")
+    model.save(env_name + "_env_models/ppo_" + env_name + "_env_")
 
 
 if __name__ == "__main__":

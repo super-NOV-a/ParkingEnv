@@ -17,6 +17,14 @@ def make_env(rank: int, render_mode=None, env_name="point"):
             from CarEnv import CarEnv
             env = CarEnv(render_mode=render_mode if rank == 0 else None)
 
+        elif env_name == "jit_car":
+            from jit_CarEnv import CarEnv
+            env = CarEnv(render_mode=render_mode if rank == 0 else None)
+
+        elif env_name == "lidar_car":
+            from parkingEnv import CarEnv
+            env = CarEnv(render_mode=render_mode if rank == 0 else None)
+
         else:
             raise AssertionError("--parallel_wrap.py中没找到该环境")
 
