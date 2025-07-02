@@ -14,6 +14,8 @@ from multiprocessing import Pool, cpu_count
 import time
 import random
 
+random.seed(123)
+
 class ParkingEnv(Env):
     def __init__(self, config):
         # 配置参数
@@ -836,7 +838,7 @@ if __name__ == "__main__":
         'rays_per_sector': 1,
         'timestep': 0.1,
         'max_steps': 500,
-        'render_mode': 'human',
+        'render_mode': None, # 'human',
         'scenario_mode': 'random',  # 或 'file'
         'world_size': 40.0,
         'min_obstacles': 5,
@@ -857,6 +859,7 @@ if __name__ == "__main__":
     pygame.display.set_caption("Parking Environment - Manual Control")
     screen = pygame.display.set_mode(env.screen_size)
 
+    start = time.time()
     while True:
         obs, _ = env.reset()
         terminated = False
@@ -866,8 +869,8 @@ if __name__ == "__main__":
         # 重置动作
         action = np.array([0.0, 0.0], dtype=np.float32)
         
-        # 初始渲染
-        env.render()
+        # # 初始渲染
+        # env.render()
         
         while not (terminated or truncated):
             # 处理键盘事件
@@ -913,9 +916,6 @@ if __name__ == "__main__":
             obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
             
-            # 强制每一步都渲染
-            env.render()
-            
             # 显示当前控制状态
             font = pygame.font.SysFont(None, 24)
             steer_text = font.render(f"Steering: {action[0]:.2f}", True, (0, 0, 255))
@@ -927,7 +927,9 @@ if __name__ == "__main__":
             # 控制帧率
             pygame.time.Clock().tick(30)
         
-        print(f"Total reward: {total_reward}")
+        end = time.time()
+        print(end-start)
+        # print(f"Total reward: {total_reward}")
     
     env.close()
     pygame.quit()
