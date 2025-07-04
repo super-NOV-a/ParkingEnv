@@ -15,6 +15,7 @@ import time
 import random
 from lidar import Lidar2D
 
+np.random.seed(123)
 random.seed(123)
 
 class ParkingEnv(Env):
@@ -25,79 +26,77 @@ class ParkingEnv(Env):
         self.max_range = 30.0
         self.max_steps = config.get('max_steps', 500)
         self.render_mode = config.get('render_mode', 'human')
-        self.scenario_mode = config.get('scenario_mode', 'file')  # 'file' 或 'random'
-        self.collision_threshold = config.get('collision_threshold', 0.5)  # 碰撞阈值
+        self.scenario_mode = config.get('scenario_mode', 'random')  # 默认改为随机模式
+        self.collision_threshold = config.get('collision_threshold', 0.5)
+        
+        # 仅在文件模式下初始化场景文件列表
+        self.scenario_files = None
+        if self.scenario_mode == 'file':
+            self.scenario_files = self._get_scenario_files()
         
         # 随机场景参数
-        self.world_size = config.get('world_size', 30.0)  # 世界大小（米）
+        self.world_size = config.get('world_size', 30.0)
         self.min_obstacles = config.get('min_obstacles', 3)
         self.max_obstacles = config.get('max_obstacles', 8)
-        self.min_parking_size = config.get('min_parking_size', 3.0)  # 最小停车位尺寸
-        self.max_parking_size = config.get('max_parking_size', 5.0)  # 最大停车位尺寸
-        self.min_obstacle_size = config.get('min_obstacle_size', 1.0)  # 最小障碍物尺寸
-        self.max_obstacle_size = config.get('max_obstacle_size', 4.0)  # 最大障碍物尺寸
+        self.min_parking_size = config.get('min_parking_size', 3.0)
+        self.max_parking_size = config.get('max_parking_size', 5.0)
+        self.min_obstacle_size = config.get('min_obstacle_size', 1.0)
+        self.max_obstacle_size = config.get('max_obstacle_size', 10.0)
         
         # 车辆参数
-        self.wheelbase = 2.5  # 轴距 (米)
-        self.max_steer = np.radians(30)  # 最大转向角 (弧度)
-        self.max_speed = 2.0  # 最大速度 (米/秒) - 停车场景降低速度
-        self.car_length = 4.7  # 车长 (米)
-        self.car_width = 1.8   # 车宽 (米)
+        self.wheelbase = 2.5
+        self.max_steer = np.radians(30)
+        self.max_speed = 2.0
+        self.car_length = 5
+        self.car_width = 2
         
         # 雷达配置
         lidar_config = {
             'range_min': 0.5,
             'max_range': config.get('max_range', 10.0),
-            'angle_range': 360,  # 视野角度 (度)
-            'num_beams': 72,    # 射线数量
+            'angle_range': 360,
+            'num_beams': 72,
             'noise': False,
-            'std': 0.05,        # 距离噪声
-            'angle_std': 0.5     # 角度噪声 (度)
+            'std': 0.05,
+            'angle_std': 0.5
         }
-        # 创建雷达实例
         self.lidar = Lidar2D(lidar_config)
         
-        # 观测空间: 雷达数据 + [速度, 转向角] + [目标距离, 目标角度, 目标角度差]
+        # 观测空间
         self.observation_space = spaces.Box(
             low=0,
             high=self.max_range,
-            shape=(lidar_config['num_beams'] + 5,),  # 雷达数据 + [v, steer] + [目标距离, 目标角度, 目标角度差]
+            shape=(lidar_config['num_beams'] + 5,),
             dtype=np.float32
         )
-        # 动作空间定义
+        
+        # 动作空间
         self.action_space = spaces.Box(
             low=np.array([-1, -1]), 
-            high=np.array([1, 1]),  # [转向, 油门]
+            high=np.array([1, 1]),
             dtype=np.float32
         )
         
         # 场景数据
-        self.scenario_files = self._get_scenario_files()
-        self.current_scenario = None
+        self.current_scenario = "Random Scenario" if self.scenario_mode == 'random' else None
         self.ego_info = None
         self.target_info = None
         self.obstacles = []
         self.obstacle_geoms = []
         
         # 车辆状态
-        self.vehicle_state = None  # [x, y, yaw, v, steer]
+        self.vehicle_state = None
         self.step_count = 0
-        self.prev_dist = float('inf')  # 用于奖励计算
+        self.prev_dist = float('inf')
         
         # 渲染相关
         self.screen = None
         self.clock = pygame.time.Clock()
-        self.screen_size = (800, 800)  # 渲染窗口大小
-        self.scale = 10  # 米到像素的缩放比例
-        
-        # 性能优化
-        self.radar_cache = {}
-        self.vehicle_poly_cache = None
-        self.last_render_time = 0
-        self.render_interval = 0.01  # 渲染间隔 (秒)
+        self.screen_size = (800, 800)
+        self.scale = 10
     
     def _get_scenario_files(self):
-        """获取所有场景JSON文件"""
+        """仅在文件模式下获取场景JSON文件"""
         files = []
         for f in os.listdir(self.data_dir):
             if f.endswith('.json'):
@@ -109,11 +108,10 @@ class ParkingEnv(Env):
         with open(file_path, 'r') as file:
             data = json.load(file)
         
-        # 提取坐标系原点信息
         nfm_origin = data['Frames']['0'].get("m_nfmOrigin", [0, 0])
         m_pathOrigin = data['Frames']['0']['PlanningRequest'].get("m_origin", [0, 0])
         
-        # 提取自车信息并转换坐标系
+        # 提取自车信息
         ego_data = data['Frames']['0']['PlanningRequest']['m_startPosture']['m_pose']
         ego_info = [
             ego_data[0] + m_pathOrigin[0] - nfm_origin[0],
@@ -121,7 +119,7 @@ class ParkingEnv(Env):
             self._normalize_angle(ego_data[2])
         ]
         
-        # 提取目标信息并转换坐标系
+        # 提取目标信息
         target_data = data['Frames']['0']['PlanningRequest']['m_targetArea']['m_targetPosture']['m_pose']
         target_info = [
             target_data[0] + m_pathOrigin[0] - nfm_origin[0],
@@ -129,13 +127,12 @@ class ParkingEnv(Env):
             self._normalize_angle(target_data[2])
         ]
         
-        # 提取障碍物信息
+        # 提取障碍物
         obstacles = []
         for obj in data['Frames']['0']['NfmAggregatedPolygonObjects']:
             points = []
             if 'nfmPolygonObjectNodes' in obj.keys():
                 for point in obj['nfmPolygonObjectNodes']:
-                    # 转换坐标系并添加到点列表
                     x = point['m_x'] + m_pathOrigin[0] - nfm_origin[0]
                     y = point['m_y'] + m_pathOrigin[1] - nfm_origin[1]
                     points.append((x, y))
@@ -145,29 +142,24 @@ class ParkingEnv(Env):
     
     def _generate_random_scenario(self):
         """生成随机障碍物和停车位场景"""
-        # 生成停车位（目标位置）
+        # 生成停车位
         parking_size = random.uniform(self.min_parking_size, self.max_parking_size)
-        parking_orientation = random.uniform(0, 2 * math.pi)  # 随机朝向
+        parking_orientation = random.uniform(0, 2 * math.pi)
         
-        # 确保停车位在边界内
         padding = parking_size * 1.5
         target_x = random.uniform(padding, self.world_size - padding)
         target_y = random.uniform(padding, self.world_size - padding)
         self.target_info = [target_x, target_y, parking_orientation]
         
-        # 生成自车初始位置（与停车位保持一定距离）
+        # 生成自车初始位置
         min_start_dist = parking_size * 2
         max_start_dist = parking_size * 4
         angle = random.uniform(0, 2 * math.pi)
         dist = random.uniform(min_start_dist, max_start_dist)
         ego_x = target_x + dist * math.cos(angle)
         ego_y = target_y + dist * math.sin(angle)
-        
-        # 确保自车在边界内
         ego_x = np.clip(ego_x, padding, self.world_size - padding)
         ego_y = np.clip(ego_y, padding, self.world_size - padding)
-        
-        # 自车朝向随机方向
         ego_yaw = random.uniform(0, 2 * math.pi)
         self.ego_info = [ego_x, ego_y, ego_yaw]
         
@@ -176,20 +168,16 @@ class ParkingEnv(Env):
         num_obstacles = random.randint(self.min_obstacles, self.max_obstacles)
         
         for _ in range(num_obstacles):
-            # 尝试生成不重叠的障碍物
-            for attempt in range(10):  # 最多尝试10次
-                # 随机选择障碍物类型（矩形或多边形）
+            for attempt in range(10):
                 obstacle_type = random.choice(['rectangle', 'polygon'])
                 
                 if obstacle_type == 'rectangle':
-                    # 生成矩形障碍物
                     width = random.uniform(self.min_obstacle_size, self.max_obstacle_size)
                     height = random.uniform(self.min_obstacle_size, self.max_obstacle_size)
                     x = random.uniform(0, self.world_size)
                     y = random.uniform(0, self.world_size)
                     angle = random.uniform(0, 2 * math.pi)
                     
-                    # 计算四个角点
                     half_w = width / 2
                     half_h = height / 2
                     corners = [
@@ -199,15 +187,13 @@ class ParkingEnv(Env):
                         (half_w, -half_h)
                     ]
                     
-                    # 旋转并平移
                     obstacle = []
                     for cx, cy in corners:
                         rx = cx * math.cos(angle) - cy * math.sin(angle)
                         ry = cx * math.sin(angle) + cy * math.cos(angle)
                         obstacle.append((x + rx, y + ry))
-                
-                else:  # 多边形
-                    num_sides = random.randint(3, 6)  # 3-6边形
+                else:
+                    num_sides = random.randint(3, 6)
                     radius = random.uniform(self.min_obstacle_size, self.max_obstacle_size)
                     x = random.uniform(radius, self.world_size - radius)
                     y = random.uniform(radius, self.world_size - radius)
@@ -220,7 +206,6 @@ class ParkingEnv(Env):
                         py = y + radius * math.sin(angle)
                         obstacle.append((px, py))
                 
-                # 检查是否与自车或目标重叠
                 poly = Polygon(obstacle)
                 ego_point = Point(self.ego_info[0], self.ego_info[1])
                 target_point = Point(self.target_info[0], self.target_info[1])
@@ -228,7 +213,6 @@ class ParkingEnv(Env):
                 min_dist_to_ego = poly.distance(ego_point)
                 min_dist_to_target = poly.distance(target_point)
                 
-                # 确保障碍物不与自车或目标太近
                 if min_dist_to_ego > self.car_length and min_dist_to_target > parking_size:
                     self.obstacles.append(obstacle)
                     break
@@ -236,14 +220,10 @@ class ParkingEnv(Env):
         return self.ego_info, self.target_info, self.obstacles
     
     def _normalize_angle(self, angle):
-        """将角度归一化到[-π, π]范围内"""
+        """角度归一化"""
         return math.atan2(math.sin(angle), math.cos(angle))
     
     def step(self, action):
-        """
-        执行一个时间步
-        """
-        # 解析动作
         steer_cmd = np.clip(action[0], -1, 1)
         throttle_cmd = np.clip(action[1], -1, 1)
         
@@ -251,17 +231,13 @@ class ParkingEnv(Env):
         current_steer = self.vehicle_state[4]
         new_steer = current_steer * 0.7 + steer_cmd * self.max_steer * 0.3
         
-        # 更新车辆状态 (简化自行车模型)
+        # 更新车辆状态
         x, y, yaw, v, _ = self.vehicle_state
-        
-        # 简化动力学模型
         new_v = np.clip(v + throttle_cmd * 1.0 * self.dt, -self.max_speed, self.max_speed)
-        
-        # 更新位置
         new_x = x + new_v * math.cos(yaw) * self.dt
         new_y = y + new_v * math.sin(yaw) * self.dt
         
-        # 更新朝向 (考虑转向)
+        # 更新朝向
         if abs(new_steer) > 1e-5:
             turn_radius = self.wheelbase / math.tan(new_steer)
             angular_velocity = new_v / turn_radius
@@ -270,9 +246,7 @@ class ParkingEnv(Env):
             new_yaw = yaw
         
         new_yaw = self._normalize_angle(new_yaw)
-        
         self.vehicle_state = np.array([new_x, new_y, new_yaw, new_v, new_steer])
-        self.vehicle_poly_cache = None  # 清空车辆多边形缓存
         
         # 获取观测
         obs = self._get_observation()
@@ -282,32 +256,26 @@ class ParkingEnv(Env):
         
         # 计算奖励
         reward = self._calculate_reward(terminated, truncated)
-        
-        # 更新步数
         self.step_count += 1
         
-        # 渲染 - 使用帧数控制而非时间间隔
-        if self.render_mode == 'human' and self.step_count % 5 == 0:  # 每5步渲染一次
+        # 渲染
+        if self.render_mode == 'human' and self.step_count % 5 == 0:
             self.render()
 
         return obs, reward, terminated, truncated, {}
     
     def reset(self, scenario_idx=None):
-        """重置环境"""
         # 根据场景模式加载或生成场景
         if self.scenario_mode == 'random':
-            # 随机生成场景
             self.ego_info, self.target_info, self.obstacles = self._generate_random_scenario()
             self.current_scenario = "Random Scenario"
         else:
-            # 从文件加载场景
             if scenario_idx is None:
                 scenario_idx = np.random.randint(0, len(self.scenario_files))
-            
             self.current_scenario = self.scenario_files[scenario_idx]
             self.ego_info, self.target_info, self.obstacles = self._load_scenario(self.current_scenario)
         
-        # 创建障碍物几何对象和空间索引
+        # 创建障碍物几何对象
         self.obstacle_geoms = []
         for obs in self.obstacles:
             if len(obs) >= 3:
@@ -328,16 +296,13 @@ class ParkingEnv(Env):
             self.ego_info[0],
             self.ego_info[1],
             self.ego_info[2],
-            0.0,  # 初始速度
-            0.0   # 初始转向角
+            0.0,
+            0.0
         ])
         
         self.step_count = 0
         self.prev_dist = float('inf')
-        self.radar_cache = {}
-        self.vehicle_poly_cache = None
         
-        # 返回初始观测
         return self._get_observation(), {}
 
     def render(self, mode=None):
@@ -651,15 +616,16 @@ class ParkingEnv(Env):
 if __name__ == "__main__":
     config = {
         'data_dir': 'C:\AI_Planner\RL\pygame_input_features_new_withinBEV_no_parallel_parking',
-        'max_range': 30.0,
+        'max_range': 15.0,
         'timestep': 0.1,
         'max_steps': 500,
-        'render_mode': None, # 'human'
+        'render_mode': "human", # "human", # 'human'
         # 随机仿真环境代替json环境
-        'scenario_mode': 'random',  # 或 'file'
-        'world_size': 40.0,
+        'scenario_mode': 'file',  # 'random' 或 'file'
+        'world_size': 30.0,
         'min_obstacles': 5,
         'max_obstacles': 10,
+        "manual": False,
     }
 
     env = ParkingEnv(config)
@@ -670,10 +636,11 @@ if __name__ == "__main__":
     steer_step = 0.1
     throttle_step = 0.1
 
-    # 初始化Pygame视频系统
-    pygame.init()
-    pygame.display.set_caption("Parking Environment - Manual Control")
-    screen = pygame.display.set_mode(env.screen_size)
+    if config["render_mode"] == "human":
+        # 初始化Pygame视频系统
+        pygame.init()
+        pygame.display.set_caption("Parking Environment - Manual Control")
+        screen = pygame.display.set_mode(env.screen_size)
 
     start = time.time()
     while True:
@@ -686,66 +653,73 @@ if __name__ == "__main__":
         action = np.array([0.0, 0.0], dtype=np.float32)
         
         # # 初始渲染
-        # env.render()
+        if config["render_mode"]=="human":
+            env.render()  
         
         while not (terminated or truncated):
-            # 处理键盘事件
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    env.close()
-                    pygame.quit()
-                    exit()
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
+            if config["manual"]:
+                # 处理键盘事件
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
                         env.close()
                         pygame.quit()
                         exit()
-            
-            # 获取按键状态 (持续按键检测)
-            keys = pygame.key.get_pressed()
-            
-            # 转向控制
-            if keys[pygame.K_LEFT]:
-                action[0] = max(-1.0, action[0] - steer_step)
-            elif keys[pygame.K_RIGHT]:
-                action[0] = min(1.0, action[0] + steer_step)
+                    elif event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            env.close()
+                            pygame.quit()
+                            exit()
+                
+                # 获取按键状态 (持续按键检测)
+                keys = pygame.key.get_pressed()
+                
+                # 转向控制
+                if keys[pygame.K_LEFT]:
+                    action[0] = max(-1.0, action[0] - steer_step)
+                elif keys[pygame.K_RIGHT]:
+                    action[0] = min(1.0, action[0] + steer_step)
+                else:
+                    # 无转向按键时缓慢回正
+                    if action[0] > 0:
+                        action[0] = max(0, action[0] - steer_step/2)
+                    elif action[0] < 0:
+                        action[0] = min(0, action[0] + steer_step/2)
+                
+                # 油门控制
+                if keys[pygame.K_UP]:
+                    action[1] = min(1.0, action[1] + throttle_step)
+                elif keys[pygame.K_DOWN]:
+                    action[1] = max(-1.0, action[1] - throttle_step)
+                else:
+                    # 无油门按键时缓慢减速
+                    if action[1] > 0:
+                        action[1] = max(0, action[1] - throttle_step/2)
+                    elif action[1] < 0:
+                        action[1] = min(0, action[1] + throttle_step/2)
             else:
-                # 无转向按键时缓慢回正
-                if action[0] > 0:
-                    action[0] = max(0, action[0] - steer_step/2)
-                elif action[0] < 0:
-                    action[0] = min(0, action[0] + steer_step/2)
-            
-            # 油门控制
-            if keys[pygame.K_UP]:
-                action[1] = min(1.0, action[1] + throttle_step)
-            elif keys[pygame.K_DOWN]:
-                action[1] = max(-1.0, action[1] - throttle_step)
-            else:
-                # 无油门按键时缓慢减速
-                if action[1] > 0:
-                    action[1] = max(0, action[1] - throttle_step/2)
-                elif action[1] < 0:
-                    action[1] = min(0, action[1] + throttle_step/2)
+                action = env.action_space.sample()
+
             
             # 执行动作
             obs, reward, terminated, truncated, _ = env.step(action)
             total_reward += reward
             
-            # 显示当前控制状态
-            font = pygame.font.SysFont(None, 24)
-            steer_text = font.render(f"Steering: {action[0]:.2f}", True, (0, 0, 255))
-            throttle_text = font.render(f"Throttle: {action[1]:.2f}", True, (0, 0, 255))
-            screen.blit(steer_text, (10, 220))
-            screen.blit(throttle_text, (10, 250))
-            pygame.display.flip()
-            
-            # 控制帧率
-            pygame.time.Clock().tick(30)
+            if config["render_mode"]=="human":
+                # 显示当前控制状态
+                font = pygame.font.SysFont(None, 24)
+                steer_text = font.render(f"Steering: {action[0]:.2f}", True, (0, 0, 255))
+                throttle_text = font.render(f"Throttle: {action[1]:.2f}", True, (0, 0, 255))
+                screen.blit(steer_text, (10, 220))
+                screen.blit(throttle_text, (10, 250))
+                pygame.display.flip()
+                
+                # 控制帧率
+                pygame.time.Clock().tick(30)
         
         end = time.time()
         print(end-start)
         # print(f"Total reward: {total_reward}")
     
     env.close()
-    pygame.quit()
+    if config["render_mode"]=="human":
+        pygame.quit()

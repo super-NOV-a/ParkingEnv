@@ -81,9 +81,7 @@ class Lidar2D:
                 closest_point = nearest_points(origin, intersection)[1]
                 dist = origin.distance(closest_point)
             else:
-                # 对于未知几何类型，使用边界上的最近点
-                closest_point = intersection.boundary.interpolate(intersection.boundary.project(origin))
-                dist = origin.distance(closest_point)
+                dist = self.range_max
                 
             # 应用距离噪声
             if self.noise:
