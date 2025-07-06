@@ -8,72 +8,13 @@ from shapely.geometry import Point, Polygon, LineString, MultiPoint, MultiLineSt
 from shapely.strtree import STRtree
 from shapely.geometry.base import BaseGeometry
 from gymnasium import Env, spaces
-import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon as MplPolygon
-from multiprocessing import Pool, cpu_count
 import time
 import random
 from lidar import Lidar2D
+from vehicle import Vehicle
 
 np.random.seed(123)
 random.seed(123)
-
-
-class Vehicle:
-    def __init__(self, wb, fh, rh, width):
-        # 设置车辆尺寸为5m×2m
-        self.wb = wb  # wheelbase = 3.0m
-        self.fh = fh  # front hang = 1.0m
-        self.rh = rh  # rear hang = 1.0m
-        self.width = width  # width = 2.0m
-        self.length = fh + wb + rh  # total vehicle length = 1+3+1=5m
-        self.poly_cache = {}  # Cache for polygon calculations
-        self.center_offset = wb/2 - rh  # 后轴中心到几何中心的偏移量
-
-    def create_polygon(self, x, y, theta, target=False):
-        """创建以几何中心为原点的车辆多边形"""
-        cache_key = (x, y, theta, target)
-        if cache_key in self.poly_cache:
-            return self.poly_cache[cache_key]
-        
-        # 使用几何中心作为参考点
-        if target:
-            # 目标区域稍大
-            length = self.length + 0.5
-            width = self.width + 0.3
-        else:
-            length = self.length
-            width = self.width
-        
-        half_l = length / 2
-        half_w = width / 2
-        
-        # 定义以几何中心为原点的多边形
-        points = np.array([
-            [half_l, -half_w, 1],    # 右前
-            [half_l, half_w, 1],     # 左前
-            [-half_l, half_w, 1],    # 左后
-            [-half_l, -half_w, 1],   # 右后
-            [half_l, -half_w, 1]     # 闭合
-        ])
-        
-        # 应用变换
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-        transformed = points.dot(np.array([
-            [cos_theta, -sin_theta, x],
-            [sin_theta, cos_theta, y],
-            [0, 0, 1]
-        ]).T)
-        
-        result = transformed[:, 0:2]
-        self.poly_cache[cache_key] = result
-        return result
-    
-    def get_shapely_polygon(self, x, y, theta):
-        """Get Shapely polygon for collision detection"""
-        points = self.create_polygon(x, y, theta)
-        return Polygon(points)
 
 
 class ParkingEnv(Env):
@@ -95,13 +36,7 @@ class ParkingEnv(Env):
         # 设置目标车位尺寸为5.5m×2.3m
         self.parking_length = 5.5  # 停车位长度
         self.parking_width = 2.3   # 停车位宽度
-        self.vehicle = Vehicle(
-            wb=self.wheelbase,
-            fh=self.front_hang,
-            rh=self.rear_hang,
-            width=self.car_width
-        )
-        self.car_length = self.vehicle.length
+        self.car_length = self.wheelbase + self.front_hang + self.rear_hang
         
         # Random scenario parameters
         self.world_size = config.get('world_size', 30.0)
@@ -117,7 +52,18 @@ class ParkingEnv(Env):
         self.max_steer = np.radians(30)
         self.max_speed = 5.0
         self.steer_filter_factor = 0.7  # 转向滤波因子
-        
+
+        self.vehicle = Vehicle(
+            wheelbase=self.wheelbase,
+            width=self.car_width,
+            front_hang=self.front_hang,
+            rear_hang=self.rear_hang,
+            max_steer=self.max_steer,
+            max_speed=self.max_speed,
+            dt=self.dt,
+            steer_filter=self.steer_filter_factor,
+        )
+
         # Lidar configuration - 确保雷达在车辆中心
         lidar_config = {
             'range_min': 0.5,
@@ -133,12 +79,11 @@ class ParkingEnv(Env):
         
         # Observation space
         self.observation_space = spaces.Box(
-            low=0,
-            high=self.max_range,
-            shape=(lidar_config['num_beams'] + 5,),
+            low=np.array([0.0] * lidar_config['num_beams'] + [-1.0, -1.0, 0.0, -1.0, -1.0]),
+            high=np.array([self.max_range] * lidar_config['num_beams'] + [1.0, 1.0, 1.0, 1.0, 1.0]),
             dtype=np.float32
         )
-        
+
         # Action space
         self.action_space = spaces.Box(
             low=np.array([-1, -1]), 
@@ -159,7 +104,6 @@ class ParkingEnv(Env):
         self.obstacle_geoms = []
         
         # Vehicle state
-        self.vehicle_state = None
         self.step_count = 0
         self.prev_dist = float('inf')
         self.vehicle_poly = None
@@ -196,74 +140,34 @@ class ParkingEnv(Env):
         return Polygon(corners_global)
 
     def step(self, action):
-        steer_cmd = np.clip(action[0], -1, 1)
-        throttle_brake = np.clip(action[1], -1, 1)  # 正值为油门，负值为刹车
+        self.vehicle.state, self.vehicle.direction = self.vehicle.step(action)
 
-        # 应用转向滤波
-        current_steer = self.vehicle_state[4]
-        new_steer = current_steer * self.steer_filter_factor + steer_cmd * self.max_steer * (
-                    1 - self.steer_filter_factor)
+        # 更新车辆多边形
+        self.vehicle_poly = self.vehicle.get_shapely_polygon()
 
-        # 处理油门/刹车动作 - 实现自然的方向切换
-        x, y, yaw, v, _ = self.vehicle_state
-
-        # 计算加速度 - 根据当前方向调整
-        if throttle_brake > 0:  # 油门
-            acceleration = throttle_brake * 2.0 * self.dt
-        elif throttle_brake < 0:  # 刹车
-            acceleration = throttle_brake * 4.0 * self.dt  # 刹车更灵敏
-        else:  # 无输入，自然减速
-            deceleration = 0.5 * self.dt
-            if abs(v) > deceleration:
-                acceleration = -np.sign(v) * deceleration
-            else:
-                acceleration = -v
-
-        # 更新速度
-        new_v = v + acceleration
-        new_v = np.clip(new_v, -self.max_speed, self.max_speed)
-
-        # 当速度接近零时自动切换方向
-        if abs(new_v) < 0.1 and throttle_brake < 0:
-            self.direction = -1  # 切换到倒车
-        elif abs(new_v) < 0.1 and throttle_brake > 0:
-            self.direction = 1  # 切换到前进
-
-        # 更新位置和方向
-        new_x = x + new_v * math.cos(yaw) * self.dt
-        new_y = y + new_v * math.sin(yaw) * self.dt
-
-        # 更新转向
-        if abs(new_steer) > 1e-5:
-            turn_radius = self.wheelbase / math.tan(new_steer)
-            angular_velocity = new_v / turn_radius
-            new_yaw = yaw + angular_velocity * self.dt
-        else:
-            new_yaw = yaw
-
-        new_yaw = self._normalize_angle(new_yaw)
-        self.vehicle_state = np.array([new_x, new_y, new_yaw, new_v, new_steer])
-        
-        # Update vehicle polygon
-        self.vehicle_poly = self.vehicle.get_shapely_polygon(new_x, new_y, new_yaw)
-        
-        # Get observation
+        # 获取观测
         obs = self._get_observation()
-        
-        # Check termination
-        terminated, truncated = self._check_termination()
-        
-        # Calculate reward
-        reward = self._calculate_reward(terminated, truncated)
+
+        # 终止判断
+        terminated, truncated, collised = self._check_termination()
+
+        # 计算奖励
+        reward = self._calculate_reward(terminated, collised)
+
         self.step_count += 1
-        
-        # Render
+
         if self.render_mode == 'human' and self.step_count % 5 == 0:
             self.render()
 
         return obs, reward, terminated, truncated, {}
-    
-    def reset(self, scenario_idx=None):
+
+    def seed(self, seed=None):
+        np.random.seed(seed)
+        random.seed(seed)
+
+    def reset(self, scenario_idx=None, seed=None, options=None):
+        if seed is not None:
+            self.seed(seed)  # 你前面已经实现了 seed()
         # Load or generate scenario
         if self.scenario_mode == 'random':
             self.ego_info, self.target_info, self.obstacles = self._generate_random_scenario()
@@ -291,21 +195,11 @@ class ParkingEnv(Env):
         self.lidar.update_obstacles(self.obstacle_geoms)
         
         # Initialize vehicle state
-        self.vehicle_state = np.array([
-            self.ego_info[0],
-            self.ego_info[1],
-            self.ego_info[2],
-            0.0,
-            0.0
-        ])
-        
-        # Create vehicle and target polygons
-        self.vehicle_poly = self.vehicle.get_shapely_polygon(
-            self.ego_info[0], self.ego_info[1], self.ego_info[2]
-        )
-        self.target_poly = Polygon(self.vehicle.create_polygon(
-            self.target_info[0], self.target_info[1], self.target_info[2], target=True
-        ))
+        self.vehicle.reset_state(self.ego_info[0], self.ego_info[1], self.ego_info[2])
+        self.vehicle_poly = self.vehicle.get_shapely_polygon()
+        # self.target_poly = Polygon(self.vehicle.create_polygon(
+        #     self.target_info[0], self.target_info[1], self.target_info[2], target=True
+        # ))
         
         self.step_count = 0
         self.prev_dist = float('inf')
@@ -339,10 +233,10 @@ class ParkingEnv(Env):
         for obs in self.obstacles:
             pygame_points = []
             for x, y in obs:
-                dx = x - self.vehicle_state[0]
-                dy = y - self.vehicle_state[1]
-                rx = dx * math.cos(-self.vehicle_state[2]) - dy * math.sin(-self.vehicle_state[2])
-                ry = dx * math.sin(-self.vehicle_state[2]) + dy * math.cos(-self.vehicle_state[2])
+                dx = x - self.vehicle.state[0]
+                dy = y - self.vehicle.state[1]
+                rx = dx * math.cos(-self.vehicle.state[2]) - dy * math.sin(-self.vehicle.state[2])
+                ry = dx * math.sin(-self.vehicle.state[2]) + dy * math.cos(-self.vehicle.state[2])
                 screen_x = center_x + int(rx * self.scale)
                 screen_y = center_y - int(ry * self.scale)
                 pygame_points.append((screen_x, screen_y))
@@ -375,11 +269,11 @@ class ParkingEnv(Env):
             px = self.target_info[0] + rx
             py = self.target_info[1] + ry
             # 转换到车辆坐标系
-            dx = px - self.vehicle_state[0]
-            dy = py - self.vehicle_state[1]
+            dx = px - self.vehicle.state[0]
+            dy = py - self.vehicle.state[1]
             # 旋转以对齐车辆朝向
-            vx = dx * math.cos(-self.vehicle_state[2]) - dy * math.sin(-self.vehicle_state[2])
-            vy = dx * math.sin(-self.vehicle_state[2]) + dy * math.cos(-self.vehicle_state[2])
+            vx = dx * math.cos(-self.vehicle.state[2]) - dy * math.sin(-self.vehicle.state[2])
+            vy = dx * math.sin(-self.vehicle.state[2]) + dy * math.cos(-self.vehicle.state[2])
             # 转换到屏幕坐标
             screen_x = center_x + int(vx * self.scale)
             screen_y = center_y - int(vy * self.scale)
@@ -390,17 +284,17 @@ class ParkingEnv(Env):
         
         # 添加车位朝向指示器（箭头）
         # 计算车位中心点
-        center_dx = self.target_info[0] - self.vehicle_state[0]
-        center_dy = self.target_info[1] - self.vehicle_state[1]
-        center_rx = center_dx * math.cos(-self.vehicle_state[2]) - center_dy * math.sin(-self.vehicle_state[2])
-        center_ry = center_dx * math.sin(-self.vehicle_state[2]) + center_dy * math.cos(-self.vehicle_state[2])
+        center_dx = self.target_info[0] - self.vehicle.state[0]
+        center_dy = self.target_info[1] - self.vehicle.state[1]
+        center_rx = center_dx * math.cos(-self.vehicle.state[2]) - center_dy * math.sin(-self.vehicle.state[2])
+        center_ry = center_dx * math.sin(-self.vehicle.state[2]) + center_dy * math.cos(-self.vehicle.state[2])
         target_center_x = center_x + int(center_rx * self.scale)
         target_center_y = center_y - int(center_ry * self.scale)
         
         # 计算箭头方向（车头方向）
         arrow_length = parking_length * 0.4 * self.scale
-        arrow_end_x = target_center_x + int(math.cos(target_yaw - self.vehicle_state[2]) * arrow_length)
-        arrow_end_y = target_center_y - int(math.sin(target_yaw - self.vehicle_state[2]) * arrow_length)
+        arrow_end_x = target_center_x + int(math.cos(target_yaw - self.vehicle.state[2]) * arrow_length)
+        arrow_end_y = target_center_y - int(math.sin(target_yaw - self.vehicle.state[2]) * arrow_length)
         
         # 绘制箭头
         pygame.draw.line(self.screen, (0, 255, 0), (target_center_x, target_center_y), 
@@ -447,10 +341,10 @@ class ParkingEnv(Env):
             exterior = list(self.vehicle_poly.exterior.coords)
             pygame_points = []
             for x, y in exterior:
-                dx = x - self.vehicle_state[0]
-                dy = y - self.vehicle_state[1]
-                rx = dx * math.cos(-self.vehicle_state[2]) - dy * math.sin(-self.vehicle_state[2])
-                ry = dx * math.sin(-self.vehicle_state[2]) + dy * math.cos(-self.vehicle_state[2])
+                dx = x - self.vehicle.state[0]
+                dy = y - self.vehicle.state[1]
+                rx = dx * math.cos(-self.vehicle.state[2]) - dy * math.sin(-self.vehicle.state[2])
+                ry = dx * math.sin(-self.vehicle.state[2]) + dy * math.cos(-self.vehicle.state[2])
                 screen_x = center_x + int(rx * self.scale)
                 screen_y = center_y - int(ry * self.scale)
                 pygame_points.append((screen_x, screen_y))
@@ -474,21 +368,36 @@ class ParkingEnv(Env):
             end_y - arrow_head_size * math.sin(angle + math.pi/6)
         )
         pygame.draw.polygon(self.screen, (255, 0, 0), [(end_x, end_y), head_point1, head_point2])
-        
+
         # Display info
         font = pygame.font.SysFont(None, 24)
         texts = [
-            f"Speed: {self.vehicle_state[3]:.2f} m/s",
-            f"Steer: {math.degrees(self.vehicle_state[4]):.1f}°",
+            f"Speed: {self.vehicle.state[3]:.2f} m/s",
+            f"Steer: {math.degrees(self.vehicle.state[4]):.1f}°",
             f"Step: {self.step_count}/{self.max_steps}",
             f"Dist: {self.prev_dist:.2f} m",
             f"Scenario: {os.path.basename(self.current_scenario)}"
         ]
-        
+
+        # === 新增目标信息 ===
+        dist_to_target = math.hypot(self.target_info[0] - self.vehicle.state[0],
+                                    self.target_info[1] - self.vehicle.state[1])
+        angle_to_target = math.atan2(self.target_info[1] - self.vehicle.state[1],
+                                     self.target_info[0] - self.vehicle.state[0])
+        rel_angle = self._normalize_angle(angle_to_target - self.vehicle.state[2])
+        heading_diff = self._normalize_angle(self.target_info[2] - self.vehicle.state[2])
+
+        texts.extend([
+            f"TargetDist: {dist_to_target:.2f} m",
+            f"RelAngle: {math.degrees(rel_angle):.1f}°",
+            f"HeadingDiff: {math.degrees(heading_diff):.1f}°"
+        ])
+
+        # === 渲染所有文本（包括新增的）===
         for i, text in enumerate(texts):
             surf = font.render(text, True, (0, 0, 0))
             self.screen.blit(surf, (10, 10 + i * 30))
-        
+
         # Update display
         pygame.display.flip()
         self.clock.tick(30)
@@ -502,7 +411,7 @@ class ParkingEnv(Env):
         # Check collision
         if self._check_collision():
             print("碰撞")
-            return True, False
+            return True, False, True
         
         # Calculate overlap with target area
         if self.target_poly and self.vehicle_poly:
@@ -512,19 +421,19 @@ class ParkingEnv(Env):
             
             # Calculate orientation difference
             yaw_diff = abs(self._normalize_angle(
-                self.vehicle_state[2] - self.target_info[2]
+                self.vehicle.state[2] - self.target_info[2]
             ))
             
             # Check success conditions
             if overlap_ratio > 0.9 and yaw_diff < math.radians(10):
                 print("成功")
-                return True, False
+                return True, False, False
         
         # Check step limit
         if self.step_count >= self.max_steps:
-            return False, True
+            return False, True, False
         
-        return False, False
+        return False, False, False
     
     def _check_collision(self):
         """Precise collision detection using Shapely"""
@@ -536,43 +445,38 @@ class ParkingEnv(Env):
                 return True
         
         return False
-    
-    def _calculate_reward(self, terminated, truncated):
-        """Improved reward calculation"""
-        # Base reward
-        reward = -0.1
-        
-        # Distance to target
-        current_dist = math.hypot(
-            self.vehicle_state[0] - self.target_info[0],
-            self.vehicle_state[1] - self.target_info[1]
-        )
-        
-        # Progress reward
-        dist_diff = self.prev_dist - current_dist
-        reward += 5.0 * dist_diff
-        self.prev_dist = current_dist
-        
-        # Orientation reward
-        yaw_diff = abs(self._normalize_angle(
-            self.vehicle_state[2] - self.target_info[2]
-        ))
-        orientation_reward = max(0, 1.0 - yaw_diff / math.pi)
-        reward += 0.5 * orientation_reward
-        
-        # Speed reward
-        reward += 0.1 * min(1.0, abs(self.vehicle_state[3]))
-        
-        # Collision penalty
-        if self._check_collision():
-            reward -= 10.0
-        
-        # Success reward
-        if terminated and current_dist < 0.5:
-            reward += 100.0
-        
+
+    def _calculate_reward(self, terminated, collised):
+        # 基本信息提取
+        x, y, yaw = self.vehicle.state[:3]
+        tx, ty, target_yaw = self.target_info
+
+        # 计算相对位置信息
+        dx = tx - x
+        dy = ty - y
+        dist = math.hypot(dx, dy)
+
+        angle_to_target = math.atan2(dy, dx)
+        rel_angle = self._normalize_angle(angle_to_target - yaw)
+        heading_diff = self._normalize_angle(target_yaw - yaw)
+
+        # 初始化 reward
+        reward = 0.0
+
+        # --- 基础奖励项 ---
+        reward -= 0.2 * dist  # 鼓励靠近
+        reward -= 0.1 * abs(rel_angle)  # 鼓励朝向目标
+        reward -= 0.05 * abs(heading_diff)  # 鼓励姿态一致
+        reward -= 0.01  # 每步惩罚
+
+        if terminated:
+            if collised:
+                reward -= 5.0  # 撞击惩罚
+            else:
+                reward += 10.0  # 成功奖励
+
         return reward
-    
+
     def _get_scenario_files(self):
         """仅在文件模式下获取场景JSON文件"""
         files = []
@@ -747,18 +651,33 @@ class ParkingEnv(Env):
     def _normalize_angle(self, angle):
         """角度归一化"""
         return math.atan2(math.sin(angle), math.cos(angle))
-    
+
     def _get_observation(self):
         # 使用雷达扫描 - 确保雷达在车辆中心
-        x, y, yaw = self.vehicle_state[:3]
+        x, y, yaw = self.vehicle.state[:3]
         radar_data = self.lidar.scan(x, y, yaw)
-        
-        # 组合观测: 雷达数据 + [速度, 转向角]
+
+        # 自车中心到目标点的向量
+        dx = self.target_info[0] - x
+        dy = self.target_info[1] - y
+
+        # 目标在自车坐标系下的极坐标（距离+方向）
+        distance = math.hypot(dx, dy)
+        angle_to_target = math.atan2(dy, dx)
+        relative_angle = self._normalize_angle(angle_to_target - yaw)
+
+        # 目标朝向与车辆朝向的差距
+        heading_diff = self._normalize_angle(self.target_info[2] - yaw)
+
+        # 组合观测: 雷达 + 归一化速度/转向角 + 目标距离 + 相对角度 + 朝向差距
         state_info = np.array([
-            self.vehicle_state[3] / self.max_speed,  # 归一化速度
-            self.vehicle_state[4] / self.max_steer,  # 归一化转向角
+            self.vehicle.state[3] / self.max_speed,  # 归一化速度
+            self.vehicle.state[4] / self.max_steer,  # 归一化转向角
+            distance / self.world_size,  # 归一化距离
+            relative_angle / np.pi,  # [-1, 1]
+            heading_diff / np.pi  # [-1, 1]
         ])
-        
+
         return np.concatenate([radar_data, state_info])
 
     def close(self):
@@ -865,8 +784,8 @@ if __name__ == "__main__":
                 font = pygame.font.SysFont(None, 24)
                 steer_text = font.render(f"Steering: {action[0]:.2f}", True, (0, 0, 255))
                 throttle_text = font.render(f"Throttle: {action[1]:.2f}", True, (0, 0, 255))
-                screen.blit(steer_text, (10, 220))
-                screen.blit(throttle_text, (10, 250))
+                screen.blit(steer_text, (10, 250))
+                screen.blit(throttle_text, (10, 280))
                 pygame.display.flip()
                 
                 # 控制帧率

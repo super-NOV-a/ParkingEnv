@@ -1,60 +1,68 @@
-import multiprocessing
-from parallel_wrap import make_parallel_envs
-from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
-from custom_callbacks import CustomLoggingCallback
+import os
+import gymnasium as gym
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CheckpointCallback
 
-env_name = "lidar_car"  # "point" "lidar" "car" "vel_point"
+# 假设你的ParkingEnv类定义在 parking_env.py 中
+from Random_JsonEnv import ParkingEnv
+
+# 你直接复制代码中ParkingEnv类到此文件或保证能导入
 
 
-def train():
-    # 创建并行环境 (8个并行)
-    env = make_parallel_envs(num_envs=6, env_name=env_name)
+def make_env():
+    config = {
+        'data_dir': 'C:\\AI_Planner\\RL\\pygame_input_features_new_withinBEV_no_parallel_parking',
+        'max_range': 15.0,
+        'timestep': 0.1,
+        'max_steps': 500,
+        'render_mode': None,    # 训练时关闭渲染
+        'scenario_mode': 'random',
+        'world_size': 30.0,
+        'min_obstacles': 0,
+        'max_obstacles': 1,
+        "manual": False,
+    }
+    env = ParkingEnv(config)
+    return env
 
-    # 创建PPO模型
+
+def main():
+    env = make_env()
+
+    # 创建保存模型和日志目录
+    log_dir = "./ppo_parking_logs/"
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Checkpoint callback，每训练一定步数保存一次模型
+    checkpoint_callback = CheckpointCallback(save_freq=10000, save_path=log_dir, name_prefix="ppo_parking")
+
     model = PPO(
         "MlpPolicy",
         env,
         verbose=1,
-        tensorboard_log="./" + env_name + "_env_tensorboard/",
-        device="auto",
-        # 调整超参数以获得更好的性能
+        tensorboard_log=log_dir,
+        learning_rate=5e-4,
+        n_steps=2048,
         batch_size=64,
-        n_steps=1024,
         gamma=0.99,
         gae_lambda=0.95,
-        ent_coef=0.01,
-        learning_rate=2e-3,
         clip_range=0.2,
-        n_epochs=10,
-        vf_coef=0.5
+        ent_coef=0.0,
+        max_grad_norm=0.5,
+        seed=123,
     )
 
-    # 每x步保存一次模型
-    checkpoint_callback = CheckpointCallback(
-        save_freq=30000,
-        save_path="./"+env_name+"_env_models/",
-        name_prefix="rl_"+env_name+"_model"
-    )
+    # 训练10万步（根据需求调整）
+    total_timesteps = 100000
 
-    # 创建自定义日志回调
-    logging_callback = CustomLoggingCallback()
-
-    # 组合回调
-    callback = CallbackList([checkpoint_callback, logging_callback])
-
-    # 训练模型
-    model.learn(
-        total_timesteps=500_000,
-        callback=callback,
-        tb_log_name="ppo_"+env_name+"_env",
-        log_interval=1  # 确保每次迭代都记录
-    )
+    model.learn(total_timesteps=total_timesteps, callback=checkpoint_callback)
 
     # 保存最终模型
-    model.save(env_name + "_env_models/ppo_" + env_name + "_env_")
+    model.save(os.path.join(log_dir, "ppo_parking_final"))
+
+    # 关闭环境
+    env.close()
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
-    train()
+    main()
