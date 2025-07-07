@@ -36,6 +36,8 @@ def make_env(control_mode: str, render: bool, manual: bool):
         'world_size': 30.0,
         'min_obstacles': 0,
         'max_obstacles': 0,
+        'max_speed':3.0 ,
+        
         'manual': manual,
         'control_mode': control_mode,
     }

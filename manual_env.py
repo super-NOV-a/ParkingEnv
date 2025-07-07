@@ -59,17 +59,19 @@ from parking_env import ParkingEnv
 
 def make_env(control_mode: str, render_mode: str) -> Tuple[ParkingEnv, dict]:
     cfg = {
-        "control_mode": control_mode,   # continuous | discrete
-        "data_dir": "C:\AI_Planner\RL\pygame_input_features_new_withinBEV_no_parallel_parking",
-        "scenario_mode": "file",     # or 'file'
-        "world_size": 30.0,
-        "min_obstacles": 0,
-        "max_obstacles": 5,
-        "max_steps": 500,
-        "timestep": 0.1,
-        "lidar_max_range": 15.0,
-        "render_mode": render_mode,
-        "manual": True,
+        'data_dir': 'C:\\AI_Planner\\RL\\pygame_input_features_new_withinBEV_no_parallel_parking',
+        'lidar_max_range': 15.0,
+        'timestep': 0.1,
+        'max_steps': 500,
+        'render_mode': 'human' if render else None,
+        'scenario_mode': 'random',
+        'world_size': 30.0,
+        'min_obstacles': 0,
+        'max_obstacles': 0,
+        'max_speed':3.0 ,
+        
+        'manual': manual,
+        'control_mode': control_mode,
     }
     return ParkingEnv(cfg), cfg
 

@@ -25,6 +25,8 @@ def make_env(control_mode: str):
         'world_size': 30.0,
         'min_obstacles': 0, # 后续增加课程学习 调整难度
         'max_obstacles': 0,
+        'max_speed':3.0 ,
+
         "manual": False,
         "control_mode": control_mode,
     }

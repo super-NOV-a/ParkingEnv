@@ -78,7 +78,7 @@ class ParkingEnv(Env):
 
         # ----- vehicle limits -------------------------------------------
         self.max_steer = math.radians(30.0)
-        self.max_speed = 1.0
+        self.max_speed: float = cfg.get("max_speed", 3.0)
         self.steer_filter_factor = 0.7
 
         # -----------------------------------------------------------------
