@@ -233,11 +233,13 @@ class ParkingEnv(Env):
         # rel_angle = _normalize_angle(angle_to_target - yaw)
         # heading_diff = _normalize_angle(tyaw - yaw)
 
-        # --- 纯距离奖励：距离越小，奖励越高 --------------------------
-        # 把距离 d 映射到[0,1] 然后计算 0.1/x -1
-        reward = (self.world_size/dist) * 0.1 - 1
-        # clip 保证落在 [-1, 1]
-        reward = min(10.0, reward)
+        # --- 平滑指数距离奖励 -----------------------------
+        scale  = self.world_size * 0.5     # ¼ 个场景长，经验值
+        reward = 2.0 * math.exp(-dist / scale) - 1.0  # (-1, +1]
+
+        # 额外事件奖惩（保持原有逻辑）
+        if terminated:
+            reward += 1.0 if not collised else -1.0
         return reward
 
 
@@ -401,68 +403,75 @@ class ParkingEnv(Env):
     # ------------------------------------------------------------------
     # Random scenario generator (minimal changes)
     # ------------------------------------------------------------------
-    def _generate_random_scenario(self):
+    def _generate_random_scenario(self, curr_level: int = 0):
+        """
+        curr_level 0→简单（近距离/少障碍） … n→困难（远距离/多障碍）
+        """
         world = self.world_size
         margin = max(self.parking_length, self.car_length) * 0.5
 
-        # 四个象限：(xmin, xmax, ymin, ymax)
-        quadrants = {
-            0: (0, world/2, 0, world/2),      # 左下
-            1: (world/2, world, 0, world/2),  # 右下
-            2: (0, world/2, world/2, world),  # 左上
-            3: (world/2, world, world/2, world)  # 右上
-        }
-
-        def sample_in(qid):
-            x0, x1, y0, y1 = quadrants[qid]
-            x = random.uniform(x0 + margin, x1 - margin)
-            y = random.uniform(y0 + margin, y1 - margin)
-            yaw = random.uniform(0, 2 * math.pi)
-            return (x, y, yaw)
-
-        # 随机选择象限
-        ego_q = random.randint(0, 3)
-        other_qs = [q for q in range(4) if q != ego_q]
-        target_q = random.choice(other_qs)
-
-        self.ego_info = sample_in(ego_q)
-        self.target_info = sample_in(target_q)
-
-        # 构造目标车位 polygon 用于后续障碍排除
+        # ------- 1. 随机目标车位（全图均可） --------------------------
+        tx = random.uniform(margin, world - margin)
+        ty = random.uniform(margin, world - margin)
+        tyaw = random.uniform(0, 2 * math.pi)
+        self.target_info = (tx, ty, tyaw)
         target_poly = Polygon(self._get_parking_corners(*self.target_info))
 
-        # 障碍物生成
+        # ------- 2. ego 以“同象限+距离壳层”采样 ----------------------
+        #   距离范围随 curr_level 线性放大
+        min_d = 2.0 + curr_level * 1.5          # meters
+        max_d = 4.0 + curr_level * 3.0
+        for _ in range(100):                    # 尝试 100 次
+            ang = random.uniform(0, 2 * math.pi)
+            d   = random.uniform(min_d, max_d)
+            ex  = np.clip(tx + d * math.cos(ang), margin, world - margin)
+            ey  = np.clip(ty + d * math.sin(ang), margin, world - margin)
+            eyaw = random.uniform(0, 2 * math.pi)
+            ego_poly = Polygon(self._get_parking_corners(ex, ey, eyaw))
+            # 与目标/边界/障碍均不碰撞
+            if not ego_poly.intersects(target_poly):
+                self.ego_info = (ex, ey, eyaw)
+                break
+        else:
+            raise RuntimeError("无法放置 ego，扩大世界或减少障碍")
+
+        # ------- 3. 生成障碍（数量随难度增加） ------------------------
         self.obstacles = []
-        max_attempts = 10
-        for _ in range(random.randint(self.min_obstacles, self.max_obstacles)):
-            for _ in range(max_attempts):
-                obs_q = random.choice(other_qs)
-                x0, x1, y0, y1 = quadrants[obs_q]
-                shape_type = random.choice(["rect", "poly"])
-
-                if shape_type == "rect":
-                    w, h = random.uniform(1.0, 3.0), random.uniform(1.0, 3.0)
-                    cx = random.uniform(x0 + margin, x1 - margin)
-                    cy = random.uniform(y0 + margin, y1 - margin)
-                    angle = random.uniform(0, 2 * math.pi)
-                    rect = [(-w/2, -h/2), (-w/2, h/2), (w/2, h/2), (w/2, -h/2)]
-                    obs = [(cx + px * math.cos(angle) - py * math.sin(angle),
-                            cy + px * math.sin(angle) + py * math.cos(angle)) for px, py in rect]
-                else:
-                    n = random.randint(3, 6)
-                    r = random.uniform(1.0, 3.0)
-                    cx = random.uniform(x0 + margin, x1 - margin)
-                    cy = random.uniform(y0 + margin, y1 - margin)
-                    ang0 = random.uniform(0, 2 * math.pi)
-                    obs = [(cx + r * math.cos(ang0 + 2 * math.pi * i / n),
-                            cy + r * math.sin(ang0 + 2 * math.pi * i / n)) for i in range(n)]
-
-                poly = Polygon(obs)
-                if not poly.intersects(target_poly):
-                    self.obstacles.append(obs)
-                    break  # 成功生成该障碍，进入下一个障碍循环
+        n_obs = random.randint(
+            max(0, self.min_obstacles - curr_level),
+            self.max_obstacles + curr_level
+        )
+        attempts = 0
+        while len(self.obstacles) < n_obs and attempts < n_obs * 20:
+            attempts += 1
+            poly = self._random_obstacle_polygon(world, margin)  # 见下辅助函数
+            if (not poly.intersects(target_poly) and
+                not poly.intersects(ego_poly)):
+                self.obstacles.append(list(poly.exterior.coords)[:-1])  # 去掉闭合点
 
         return self.ego_info, self.target_info, self.obstacles
+
+    def _random_obstacle_polygon(self, world, margin):
+        shape = random.choice(["rect", "poly"])
+        if shape == "rect":
+            w, h = random.uniform(1,3), random.uniform(1,3)
+            cx = random.uniform(margin, world-margin)
+            cy = random.uniform(margin, world-margin)
+            ang = random.uniform(0, 2*math.pi)
+            rect = [(-w/2,-h/2), (-w/2,h/2), (w/2,h/2), (w/2,-h/2)]
+            pts = [(cx + px*math.cos(ang)-py*math.sin(ang),
+                    cy + px*math.sin(ang)+py*math.cos(ang)) for px,py in rect]
+            return Polygon(pts)
+        else:
+            n = random.randint(3,6)
+            r = random.uniform(0.8,2.5)
+            cx = random.uniform(margin, world-margin)
+            cy = random.uniform(margin, world-margin)
+            ang0 = random.uniform(0, 2*math.pi)
+            pts = [(cx + r*math.cos(ang0+2*math.pi*i/n),
+                    cy + r*math.sin(ang0+2*math.pi*i/n)) for i in range(n)]
+            return Polygon(pts)
+
     # def _generate_random_scenario(self):
     #     parking_diag = math.hypot(self.parking_length, self.parking_width)
     #     parking_radius = parking_diag / 2.0

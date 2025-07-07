@@ -24,7 +24,7 @@ def make_env(control_mode: str):
         'scenario_mode': 'random',    # file or random
         'world_size': 30.0,
         'min_obstacles': 0, # 后续增加课程学习 调整难度
-        'max_obstacles': 0,
+        'max_obstacles': 2,
         'max_speed':3.0 ,
 
         "manual": False,

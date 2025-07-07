@@ -63,14 +63,14 @@ def make_env(control_mode: str, render_mode: str) -> Tuple[ParkingEnv, dict]:
         'lidar_max_range': 15.0,
         'timestep': 0.1,
         'max_steps': 500,
-        'render_mode': 'human' if render else None,
+        'render_mode': 'human',
         'scenario_mode': 'random',
         'world_size': 30.0,
         'min_obstacles': 0,
-        'max_obstacles': 0,
+        'max_obstacles': 15,
         'max_speed':3.0 ,
         
-        'manual': manual,
+        'manual': True,
         'control_mode': control_mode,
     }
     return ParkingEnv(cfg), cfg
@@ -244,7 +244,7 @@ def run_discrete(env: ParkingEnv, cfg: dict) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Manual tester for ParkingEnv")
-    p.add_argument("--mode", choices=["continuous", "discrete"], default="continuous",
+    p.add_argument("--mode", choices=["continuous", "discrete"], default="discrete",
                    help="测试时选择控制方式 连续还是离散")
     p.add_argument("--render", choices=["human", "none"], default="human",
                    help="rendering mode")
