@@ -34,5 +34,3 @@ ParkingEnv/
     ├── scenario_manager.py   # 加载 / 随机生成场景 --- 后续需要课程学习在此处进行修改！
     
     └── utils.py              # 角度归一化、车与车位角顶点计算
-    
- 
