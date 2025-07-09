@@ -1,83 +1,138 @@
-import os
-import time
+"""test.py – Evaluate or visualise a trained PPO model on *ParkingEnvArc*
+===========================================================================
+Quick examples
+--------------
+1. **Headless evaluation (mean reward) – 20 episodes**
+   ```bash
+   python test.py --model runs/arc_exp01/models/final.zip --vecnorm \
+                  --norm-path runs/arc_exp01/vec_normalize.pkl
+   ```
+2. **Watch one deterministic episode with on‑screen rendering**
+   ```bash
+   python test.py --model runs/arc_exp01/models/final.zip \
+                  --render human --play
+   ```
+"""
+from __future__ import annotations
+
 import argparse
-import numpy as np
+from pathlib import Path
+from typing import Dict
+
 import gymnasium as gym
 from stable_baselines3 import PPO
-from parking_env import ParkingEnv
+from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+from parking_env_pkg import ParkingEnv
+
+###############################################################################
+# Helpers
+###############################################################################
+
+def make_env_fn(**parking_cfg: Dict):
+    """Return a Monitor‑wrapped env (factory for DummyVecEnv)."""
+
+    def _init() -> gym.Env:
+        return Monitor(ParkingEnv(parking_cfg))
+
+    return _init
+
+###############################################################################
+# CLI
+###############################################################################
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str,
-                        default="./ppo_parking_logs/ppo_parking_final.zip",
-                        help="路径到训练好的 .zip 模型")
-    parser.add_argument("--episodes", type=int, default=5,
-                        help="测试回合数")
-    parser.add_argument("--control_mode", choices=["continuous", "discrete"],
-                        default="discrete", help="动作空间类型")
-    parser.add_argument("--deterministic", action="store_true",
-                        help="使用确定性策略")
-    parser.add_argument("--render", action="store_true",
-                        help="是否渲染环境")
-    parser.add_argument("--manual", action="store_true",
-                        help="手动控制，忽略模型")
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description="Test PPO model on ParkingEnv")
 
+    p.add_argument("--model", type=Path, # required=True, 
+                    help=".zip model file", 
+                    default="C:\AI_Planner\RL\\runs\ppo_arc\checkpoints\ppo_arc_1000000_steps.zip")  # 给定模型路径
 
-def make_env(control_mode: str, render: bool, manual: bool):
-    config = {
-        'data_dir': 'C:\\AI_Planner\\RL\\pygame_input_features_new_withinBEV_no_parallel_parking',
-        'lidar_max_range': 15.0,
-        'timestep': 0.1,
-        'max_steps': 500,
-        'render_mode': 'human' if render else None,
-        'scenario_mode': 'random',
-        'world_size': 30.0,
-        'min_obstacles': 0,
-        'max_obstacles': 0,
-        'max_speed':3.0 ,
-        
-        'manual': manual,
-        'control_mode': control_mode,
-    }
-    return ParkingEnv(config)
+    p.add_argument("--norm_path", type=Path, default=None,
+                   help="VecNormalize statistics pickle (if used during training)")
+    p.add_argument("--vecnorm", action="store_true", help="enable VecNormalize wrapper")
 
+    p.add_argument("--episodes", type=int, default=20, help="episodes for evaluation")
+    p.add_argument("--render", type=str, choices=["none", "human", "rgb_array"], default="human", help="是否渲染")
+    p.add_argument("--play", action="store_true", help="run & render one episode after eval")
 
-def main():
-    args = parse_args()
+    # Must be same as training to ensure compatibility
+    p.add_argument("--timestep", type=float, default=0.1)
+    p.add_argument("--max-steps", type=int, default=500)
 
-    # 如果选择手动模式，不加载模型
-    model = None
-    if not args.manual:
-        if not os.path.isfile(args.model_path):
-            raise FileNotFoundError(f"模型未找到: {args.model_path}")
-        model = PPO.load(args.model_path)
-        print(f"✅ 已加载模型: {args.model_path}")
+    return p.parse_args()
 
-    env = make_env(args.control_mode, args.render, args.manual)
-
-    for ep in range(1, args.episodes + 1):
-        obs, _ = env.reset()
-        done, truncated = False, False
-        ep_reward = 0.0
-        step = 0
-        while not (done or truncated):
-            if args.manual:
-                # 在 env 内部处理键盘，外部只需发送占位动作
-                action = np.array([0.0, 0.0]) if args.control_mode == 'continuous' else 1
-            else:
-                action, _ = model.predict(obs, deterministic=args.deterministic)
-            obs, reward, done, truncated, _ = env.step(action)
-            ep_reward += reward
-            step += 1
-            if args.render and not args.manual:
-                # 若渲染但非手动，适当放慢速度
-                time.sleep(env.dt)
-        print(f"Episode {ep}: steps={step}, reward={ep_reward:.2f}")
-
-    env.close()
-
+###############################################################################
+# Main
+###############################################################################
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+
+    if not args.model.exists():
+        raise FileNotFoundError(args.model)
+
+    # Parking‑env base config (match training)
+    parking_cfg = dict(
+        timestep=args.timestep,
+        max_steps=args.max_steps,
+        render_mode=None, # "human",    #  if args.render == "none" else args.render,
+        scenario_mode="random",
+        lidar_max_range=15.0,
+        world_size=30.0,
+        min_obstacles=0,
+        max_obstacles=0,
+        max_speed=3.0,
+        vehicle_type="arc",
+    )
+
+    # Build VecEnv (single env) ------------------------------------------------
+    vec_env = DummyVecEnv([make_env_fn(**parking_cfg)])
+
+    # Attach VecNormalize if requested -----------------------------------------
+    if args.vecnorm:
+        if not args.norm_path:
+            raise ValueError("--vecnorm requires --norm-path pointing to vec_normalize.pkl")
+        if not args.norm_path.exists():
+            raise FileNotFoundError(args.norm_path)
+        vec_env = VecNormalize.load(args.norm_path, vec_env)
+        vec_env.training = False  # turn off updates
+        vec_env.norm_reward = False
+
+    # Load model
+    model: PPO = PPO.load(args.model, vec_env)
+
+    # Evaluation ---------------------------------------------------------------
+    mean_r, std_r = evaluate_policy(
+        model, vec_env, n_eval_episodes=args.episodes, deterministic=True
+    )
+    print(f"Evaluated {args.episodes} episodes → mean reward {mean_r:.2f} ± {std_r:.2f}")
+
+    # Optional playback --------------------------------------------------------
+    if args.play and args.render != "none":
+        env = ParkingEnv({**parking_cfg, "render_mode": args.render})
+        if args.vecnorm:
+            env = VecNormalize.load(args.norm_path, DummyVecEnv([lambda: env]))
+            env.training = False
+            env.norm_reward = False
+        
+        while True:
+            obs, _ = env.reset()
+            done = truncated = coll= False
+            while not (done or truncated):
+                action, _ = model.predict(obs, deterministic=True)
+                obs, _, done, truncated, info = env.step(action)
+                
+                collision = info.get("collision", False)
+                if done or truncated:
+                    if done and not collision:
+                        print("success")
+                    else:
+                        print("failure")
+                    env.reset()
+                env.render()
+        env.close()
+
+    vec_env.close()
