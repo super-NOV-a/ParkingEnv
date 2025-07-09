@@ -25,7 +25,7 @@ ParkingEnv/
 
 训练只需要执行：
 ```
-python c:/AI_Planner/RL/Env2/Train.py
+python Train.py
 ```
 
 测试只需要指定模型（或直接在Test.py中修改模型路径）执行：
