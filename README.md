@@ -38,4 +38,4 @@ python Test.py --model="./runs/ppo_arc/checkpoints/your_checkpoint.zip" --play
 python manual_arc_env.py
 ```
 
-![](figures/random_env_example.png "随机场景示意"){width=50%}
+![](figures/random_env_example.png "随机场景示意"){width=30%}
