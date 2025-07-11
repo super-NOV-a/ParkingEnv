@@ -182,16 +182,17 @@ class ParkingEnv(gym.Env):
         if len(self._success_history) < self._success_history.maxlen:
             return
         success_rate = sum(self._success_history) / len(self._success_history)
-        if success_rate > 0.5 and self.level < 10:
+        if success_rate > 0.7 and self.level < 10:
             self.level += 1
+            self._success_history.clear()
             print(f"[Difficulty ↑] level={self.level}  success_rate={success_rate:.2%}")
-        elif success_rate < 0.3 and self.level > 0:
+        elif success_rate < 0.5 and self.level > 0:
             self.level -= 1
+            self._success_history.clear()
             print(f"[Difficulty ↓] level={self.level}  success_rate={success_rate:.2%}")
         self.success_dist  = float(self.dist_levels[self.level])
         self.success_angle = float(self.angle_levels[self.level])
-        self._success_history.clear()
-
+        
     # ------------------------------------------------------------------
     # Cached lidar scan
     # ------------------------------------------------------------------

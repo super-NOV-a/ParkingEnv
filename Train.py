@@ -19,6 +19,7 @@ unchanged.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import os
 from pathlib import Path
 from typing import Dict
@@ -42,6 +43,19 @@ from custom_policy_model import RadarConvFusion, CustomMLP
 ###############################################################################
 # Helpers
 ###############################################################################
+def unique_logdir(base: Path, resume: bool) -> Path:
+    """
+    If resume=False and base already exists, append _1/_2/... until unused.
+    Keeps base unchanged when resume=True.
+    """
+    if resume or not base.exists():
+        return base
+    idx = 1
+    while True:
+        cand = Path(f"{base}_{idx}")
+        if not cand.exists():
+            return cand
+        idx += 1
 
 def make_env_fn(vehicle_type: str, **parking_cfg: Dict):
     """Factory producing *Monitor*‑wrapped envs for vectorisation."""
@@ -90,7 +104,12 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--cuda", action="store_true", help="force CUDA (if available)")
     p.add_argument("--vecnorm", action="store_true", help="enable VecNormalize")
-    p.add_argument("--resume", action="store_true", help="resume if logdir exists")
+
+    # –– resume / load ––
+    p.add_argument("--resume", action="store_true", help="continue writing into logdir")
+    p.add_argument("--load_model", type=Path, default=None,
+                   help="path to a pre-trained .zip to initialise weights (does not imply --resume)")
+
 
     # –– evaluation ––
     p.add_argument("--eval_freq", type=int, default=50_000)
@@ -99,8 +118,56 @@ def parse_args():
     return p.parse_args()
 
 ###############################################################################
-# Main
-###############################################################################
+# Train.py – 日志目录 & 预训练权重 速查表
+#
+# 关键词             作用                         说明
+# ---------------------------------------------------------------------------
+# --logdir PATH      指定本次训练写入的目录       不含 runs/ 前缀也可
+# --resume           继续写入同一个 logdir        自动寻找 checkpoints 下最新 .zip
+# --load_model PATH  先加载指定 .zip 再训练        不会影响 logdir 的唯一化选择
+#
+# parking_cfg["log_dir"]   若 CLI 未指定 --logdir，则使用它
+# parking_cfg["model_ckpt"]若 CLI 未指定 --load_model，则使用它
+#
+# 唯一化策略: 当 resume=False 且目标目录已存在时，在末尾自动追加 _1/_2/… 避免覆盖
+# 目录格式: runs/ppo_<vehicle_type>_<logdir_stub>[_k]  (k 为自动编号)
+#
+# 优先级: CLI 明确参数 > parking_cfg 设置 > 默认 (时间戳)
+#
+# ─────────── 常用调用范例 ─────────────────────────────────────────────
+#
+# 1. 全新训练 – 自动生成时间戳目录
+#    $ python Train.py --vehicle_type arc
+#    → runs/ppo_arc_20250711_161233/
+#
+# 2. 全新训练 – 手动指定 logdir（若已存在自动 _1/_2）--------------------------     <-
+#    $ python Train.py --vehicle_type arc --logdir random_cnn
+#    → runs/ppo_arc_random_cnn/  (或 random_cnn_1 …)
+#
+# 3. 继续在同目录训练（恢复最新 checkpoint）
+#    $ python Train.py --vehicle_type arc --logdir random_cnn --resume
+#
+# 4. 加载外部权重，但写入新目录------------------------------------------------     <-
+#    $ python Train.py --vehicle_type arc \\
+#                      --logdir random_cnn \\
+#                      --load_model "runs/ppo_arc_empty_cnn/checkpoints/ppo_arc_1e6_steps.zip"
+#
+# 5. 仅靠配置文件驱动
+#    parking_cfg = { "log_dir": "random_cnn", 
+#                    "model_ckpt": "runs/ppo_arc_empty_cnn/..." }
+#    $ python Train.py
+#
+# 6. 覆盖配置文件里的 model_ckpt
+#    $ python Train.py --load_model my_pretrain.zip
+#
+# 7. 覆盖配置文件里的 log_dir 并接着写
+#    $ python Train.py --logdir random_cnn --resume
+#
+# 8. 不想 resume，只想让脚本自己起 _1/_2
+#    $ python Train.py --logdir random_cnn
+#
+# (所有示例中若省略 --logdir，则由 parking_cfg["log_dir"] 或时间戳替代)
+# ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     args = parse_args()
@@ -128,27 +195,33 @@ if __name__ == "__main__":
         # 训练模型管理项 ↓↓↓
         logdir="cnn", # 可以此处指定log_dir！
 
-        # model_ckpt = "\\runs\ppo_arc_empty_fc\\best_model\\best_model.zip",
-        model_ckpt=None,  # 如需加载模型路径填绝对路径或 pathlib.Path 对象 运行时使用： python Train.py --resume
+        # 这里写好要导入的模型，然后在命令行继续训练：python Train.py --resume
+        # model_ckpt = "\\runs\ppo_arc_empty_fc\\best_model\\best_model.zip","runs\ppo_arc_empty_cnn\checkpoints\ppo_arc_1000000_steps.zip"
+        model_ckpt=".\\runs\ppo_arc_empty_cnn\checkpoints\ppo_arc_1000000_steps.zip",  # 如需加载模型路径填绝对路径或 pathlib.Path 对象
 
         # 自定义模型类型，见--custom_policy_model.py
         policy_class="RadarConvFusion",  # 可选 "CustomMLP" 或 "RadarConvFusion"
         
     )
     # 训练时保存模型和log的位置可以在 parking_cfg 中指定 log_dir，
-    # 也可以在命令行指定：python Train.py --logdir="runs/your_log_path"
+    # 在命令行指定：python Train.py --logdir="runs/your_log_path"
+
+    # ── auto-propagate model_ckpt from cfg if CLI didn’t specify ─────
+    if args.load_model is None and parking_cfg.get("model_ckpt"):
+        args.load_model = Path(parking_cfg["model_ckpt"])
+        print(f"[Init]  Auto-loading weights from parking_cfg: {args.load_model}")
+
     EVAL = False    # 先不进行评估，因为评估环境于训练环境的难度不一致，没有参考价值
     
     # ────────────────────── dynamic default logdir if not provided
     if args.logdir is None:
-        logdir = parking_cfg.get("logdir", None)    
-        if logdir:              # 若命令行没有给出，但是parking_cfg中配置了
-            scenario_mode = parking_cfg.get("scenario_mode", None)    
-            args.logdir = Path(f"runs/ppo_{args.vehicle_type}_{scenario_mode}_{logdir}")
-        else:                   # 都没给出log_dir则按时间生成路径
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            args.logdir = Path(f"runs/ppo_{args.vehicle_type}_{timestamp}")
+        logdir_stub = parking_cfg.get("logdir") or datetime.now().strftime("%Y%m%d_%H%M%S")
+        scene = parking_cfg.get("scenario_mode")
+        args.logdir = Path(f"runs/ppo_{args.vehicle_type}_{scene}_{logdir_stub}")
+
+    # ── ensure uniqueness unless --resume ───────────────────────────
+    args.logdir = unique_logdir(args.logdir, args.resume)
+    print(f"[Logdir] Writing to {args.logdir}")
     
     tb_dir = args.logdir / "tb"
     ckpt_dir = args.logdir / "checkpoints"
@@ -188,12 +261,19 @@ if __name__ == "__main__":
     )
 
     # ── Model (resume or fresh) ────────────────────────────────────────────────────
-    model_ckpt = parking_cfg.get("model_ckpt", None)
-    if args.resume and model_ckpt:
-        print("──────────────────────────────────────────────")
-        print(f"[Resume] Loading model from {model_ckpt}")
-        print("──────────────────────────────────────────────")
-        model = PPO.load(model_ckpt, env=env, device=device, policy_kwargs=policy_kwargs)
+
+    # logic priority: 1) --resume → reload latest ckpt  2) --load_model → warm-start
+    #                 3) fresh init
+    latest_ckpt = max((args.logdir / "checkpoints").glob("*.zip"),
+                      key=lambda p: int(p.stem.split("_")[-2]) if "_" in p.stem else 0,
+                      default=None)     # 路径下最新的
+
+    if args.resume and latest_ckpt is not None:
+        print(f"[Resume] Continue training from {latest_ckpt}")
+        model = PPO.load(latest_ckpt, env=env, device=device, policy_kwargs=policy_kwargs)
+    elif args.load_model is not None:
+        print(f"[Init]  Load weights from {args.load_model}")
+        model = PPO.load(args.load_model, env=env, device=device, policy_kwargs=policy_kwargs)
     else:
         model = PPO(
             policy="MlpPolicy",
@@ -257,7 +337,8 @@ if __name__ == "__main__":
         )
 
     # ── Save artifacts ───────────────────────────────────────────────
-    model.save(model_dir / "final")
+    step_tag = f"{model.num_timesteps:_}".replace(",", "")
+    model.save(model_dir / f"final_{step_tag}")
     if args.vecnorm:
         env.save(norm_path)
     env.close()
