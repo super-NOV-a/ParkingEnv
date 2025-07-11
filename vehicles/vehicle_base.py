@@ -18,7 +18,7 @@ class VehicleBase:
         self.state = np.zeros(5, dtype=np.float32)
         self.direction = 1
         self.switch_count = 0   # 用于vehicle_arc.py 计算运动方向切换次数
-        self._last_direction = 1  # 初始化为前进
+        self._last_direction = None  # 初始化为无方向
 
         self._geom_offset = self.wheelbase / 2 + (front_hang - rear_hang) / 2
         self._geom_cache = np.zeros(3, dtype=np.float32)
@@ -28,7 +28,7 @@ class VehicleBase:
         self._update_geom_cache()
         self.direction = 1
         self.switch_count = 0   # 用于vehicle_arc.py 计算运动方向切换次数
-        self._last_direction = 1  # 初始化为前进
+        self._last_direction = None  # 初始化为无方向
 
     def _update_geom_cache(self):
         x_r, y_r, yaw = self.state[:3]
@@ -39,7 +39,7 @@ class VehicleBase:
     def get_pose_center(self) -> Tuple[float, float, float]:
         return tuple(self._geom_cache)
 
-    def get_shapely_polygon(self):
+    def get_shapely_polygon(self):  # 这是耗时较多的部分
         from shapely.geometry import Polygon
         cx, cy, yaw = self.get_pose_center()
         half_w = self.width / 2

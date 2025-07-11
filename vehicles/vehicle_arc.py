@@ -29,7 +29,7 @@ if USING_NUMBA:
             y += R * (-math.cos(yaw_n) + math.cos(yaw))
             yaw = yaw_n
         yaw = math.atan2(math.sin(yaw), math.cos(yaw))
-        v = s  # velocity not physically meaningful here  不过其意义也能解释过去
+        v = 3*s  # velocity not physically meaningful here  不过其意义也能解释过去，乘以3以满足原本的最大速度3m/s
         return np.array([x, y, yaw, v, steer], dtype=np.float32)
 
 class VehicleArc(VehicleBase):
@@ -55,7 +55,7 @@ class VehicleArc(VehicleBase):
 
         # 在 step() 函数里执行后：
         new_direction = 1 if self.state[3] >= 0 else -1
-        if new_direction != self._last_direction:
+        if self._last_direction != None and new_direction != self._last_direction:
             self.switch_count += 1
         self._last_direction = new_direction
         self.direction = new_direction
@@ -76,5 +76,5 @@ class VehicleArc(VehicleBase):
             y += R * (-math.cos(yaw_n) + math.cos(yaw))
             yaw = yaw_n
         yaw = _normalize_angle(yaw)
-        v = s  # not divided by dt anymore
+        v = 3*s  # not divided by dt anymore
         self.state[:] = (x, y, yaw, v, steer)

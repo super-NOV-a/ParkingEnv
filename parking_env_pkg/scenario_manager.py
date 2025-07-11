@@ -3,7 +3,6 @@ from __future__ import annotations
 import json, os, random, math
 from pathlib import Path
 from typing import List, Tuple, Sequence, Optional
-
 import numpy as np
 from shapely.geometry import Polygon, LineString, Point
 
@@ -34,22 +33,30 @@ class ScenarioManager:
 
     # ---------- Public API -------------------------------------------------
     def init(self, *, seed: Optional[int] = None,
-             scenario_idx: Optional[int] = None):
+             scenario_idx: Optional[int] = None,
+             current_level: Optional[int] = 0,):
         """根据 cfg['scenario_mode'] 返回场景三元组"""
         if seed is not None:
             random.seed(seed); np.random.seed(seed)
         mode = self.cfg.get("scenario_mode", "random")
         if mode == "file":
             return self._load_from_file(scenario_idx)
-        return self._generate_random()
+        if mode == "empty": # 如果需要边框，可以在random时将occupy_prob设为0
+            return self._generate_empty(current_level)
+        return self._generate_random(current_level)
 
     # ---------- File mode --------------------------------------------------
     def _load_from_file(self, idx: Optional[int]):
         files = self._scenario_files()
+        if not files:
+            raise FileNotFoundError(
+                f"No *.json scenario files found in {self.data_dir.resolve()}\n"
+                "→ 请确认 data_dir 是否正确，或改用 scenario_mode='random'"
+            )
         if idx is None:
             idx = random.randint(0, len(files) - 1)
         file_path = files[idx]
-        return (*self._parse_json(file_path), os.path.basename(file_path))
+        return self._parse_json(file_path) # (*self._parse_json(file_path), os.path.basename(file_path))
 
     def _scenario_files(self):
         return sorted(f for f in self.data_dir.glob("*.json"))
@@ -129,6 +136,106 @@ class ScenarioManager:
     # ---------- Random mode ------------------------------------------------
     def _generate_random(self, curr_level: int = 0):
         """
+        生成“主路 + 障碍区”场景，
+        车位朝向在 {0°, 90°, 45°} 中随机选一种，gap 不变。
+        """
+        # ---------- 0. 读配置 / 常量 --------------------------
+        cfg  = self.cfg
+        W    = self.world_size
+        pl, pw = self.parking_length, self.parking_width
+        cl, cw = self.car_length,  self.car_width
+        margin      = cfg.get("margin", 1.0)
+        gap         = cfg.get("gap", 4.0)
+        wall_thick  = cfg.get("wall_thickness", 0.2)
+        occupy_prob = min(0.9, cfg.get("occupy_prob", 0.5) + 0.05 * curr_level)
+
+        # ---------- 1. 主路位置（两栏 / 三栏随机） --------------
+        layout_mode = random.choice(("two", "three"))
+        if layout_mode == "two":
+            half = W / 2
+            road_side = cfg.get("road_side", random.choice(("left", "right")))
+            if road_side == "left":
+                road_ymin, road_ymax = 0.0, half
+                obs_bands = [(half, W)]
+            else:
+                road_ymin, road_ymax = half, W
+                obs_bands = [(0.0, half)]
+        else:                                  # "three"
+            third = W / 3
+            road_ymin, road_ymax = third, 2 * third
+            obs_bands = [(0.0, third), (2 * third, W)]
+
+        # ---------- 2. 随机车位朝向 ---------------------------
+        yaw = random.choice([0.0, math.pi / 2, math.pi / 4])
+
+        # 旋转后包络尺寸（用于排布）
+        bbox_x = abs(pl * math.cos(yaw)) + abs(pw * math.sin(yaw))
+        bbox_y = abs(pl * math.sin(yaw)) + abs(pw * math.cos(yaw))
+
+        # ---------- 3. 生成车位网格 ---------------------------
+        parking_spots: list[tuple[Polygon, tuple[float, float, float]]] = []
+        used_polys:    list[Polygon] = []
+
+        for ymin, ymax in obs_bands:
+            # 靠近主路那一边
+            if ymax == road_ymin:                # 障碍区在主路下方
+                row_y = ymax - bbox_y / 2 - margin
+            else:                                # 障碍区在主路上方
+                row_y = ymin + bbox_y / 2 + margin
+
+            x_start = margin + bbox_x / 2
+            x_end   = W - margin - bbox_x / 2
+            step    = bbox_x + gap
+            n_cols  = max(1, int((x_end - x_start) / step) + 1)
+
+            for i in range(n_cols):
+                tx = x_start + i * step
+                ty = row_y
+                spot_poly = Polygon(
+                    parking_corners(tx, ty, yaw, pl, pw)
+                )
+                parking_spots.append((spot_poly, (tx, ty, yaw)))
+
+        # ---------- 4. 目标车位 + 障碍 ------------------------
+        target_poly, target_info = random.choice(parking_spots)
+        obstacles: list[list[tuple[float, float]]] = []
+
+        for sp, _ in parking_spots:
+            if sp.equals(target_poly):
+                continue
+            if random.random() < occupy_prob:
+                obstacles.append(list(sp.exterior.coords)[:-1])
+                used_polys.append(sp)
+
+        # ---------- 5. ego 采样（主路矩形内） ------------------
+        for _ in range(100):
+            ex = random.uniform(margin + cl / 2, W - margin - cl / 2)
+            ey = random.uniform(road_ymin + cw / 2, road_ymax - cw / 2)
+            eyaw = random.uniform(-math.pi, math.pi)
+            ego_poly = Polygon(parking_corners(ex, ey, eyaw, cl, cw))
+            if not any(ego_poly.intersects(p) for p in used_polys):
+                ego_info = (ex, ey, eyaw)
+                break
+        else:
+            raise RuntimeError("无法为 ego 找到合法初始位，扩大 world_size 或降低密度")
+
+        # ---------- 6. 场景边墙（可选） ------------------------
+        if wall_thick > 0:
+            walls = [
+                [(0, 0), (W, 0), (W, wall_thick), (0, wall_thick)],
+                [(0, W - wall_thick), (W, W - wall_thick), (W, W), (0, W)],
+                [(0, 0), (wall_thick, 0), (wall_thick, W), (0, W)],
+                [(W - wall_thick, 0), (W, 0), (W, W), (W - wall_thick, W)]
+            ]
+            obstacles.extend(walls)
+
+        # ---------- 7. 返回 ----------------------------------
+        self.ego_info, self.target_info, self.obstacles = (
+            ego_info, target_info, obstacles)
+        return self.ego_info, self.target_info, self.obstacles
+
+    def _generate_random_legacy(self, curr_level: int = 0):
+        """
         curr_level 0→简单（近距离/少障碍） … n→困难（远距离/多障碍）
         """
         world = self.world_size
@@ -195,4 +302,31 @@ class ScenarioManager:
             pts = [(cx + r*math.cos(ang0+2*math.pi*i/n),
                     cy + r*math.sin(ang0+2*math.pi*i/n)) for i in range(n)]
             return Polygon(pts)
+
+    def _generate_empty(self, curr_level: int = 0):
+        """
+        curr_level, 根据level调整环境大小, 0→简单（近距离） … n→困难（远距离）
+        """
+        world = self.world_size
+        margin = max(self.parking_length, self.car_length) * 0.5
+
+        # ------- 1. 随机目标车位（全图均可） --------------------------
+        tx = random.uniform(margin, world - margin)
+        ty = random.uniform(margin, world - margin)
+        tyaw = random.uniform(0, 2 * math.pi)
+        self.target_info = (tx, ty, tyaw)
+
+        # ------- 2. ego 以“同象限+距离壳层”采样 ----------------------
+        #   距离范围随 curr_level 线性放大
+        min_d = 2.0 + curr_level * 1.5          # meters
+        max_d = 10.0 + curr_level * 3.0     # 最远40米
+        ang = random.uniform(0, 2 * math.pi)
+        d   = random.uniform(min_d, max_d)
+        ex  = np.clip(tx + d * math.cos(ang), margin, world - margin)
+        ey  = np.clip(ty + d * math.sin(ang), margin, world - margin)
+        eyaw = random.uniform(0, 2 * math.pi)
+        self.ego_info = (ex, ey, eyaw)
+
+        return self.ego_info, self.target_info, []
+
 

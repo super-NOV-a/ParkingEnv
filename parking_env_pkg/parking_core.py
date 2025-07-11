@@ -1,176 +1,362 @@
-# parking_env_pkg/parking_core.py
 from __future__ import annotations
 import math, random, numpy as np
-from typing import Dict, Optional, Tuple, List, Sequence
+from typing import Dict, Optional, Tuple, List
+from collections import deque
 
 import gymnasium as gym
-from shapely.geometry import Polygon
 
-from .utils import _normalize_angle, parking_corners
-
+from .utils import _normalize_angle
 from vehicles.vehicle_continuous import VehicleContinuous
 from vehicles.vehicle_disc_accel import VehicleDiscAccel
 from vehicles.vehicle_arc import VehicleArc
-
 from lidar import Lidar2D
 from .scenario_manager import ScenarioManager
 from .render import PygameRenderer
 
 Vector = Tuple[float, float]
 
+# -----------------------------------------------------------------------------
+# 注册可切换的车辆类型
+# -----------------------------------------------------------------------------
 _VEHICLE_REGISTRY = {
-    "continuous": (VehicleContinuous,
-                   lambda cls: gym.spaces.Box(low=np.array([-1., -1.]),
-                                              high=np.array([1., 1.]),
-                                              dtype=np.float32)),
-    "disc_accel": (VehicleDiscAccel,
-                   lambda cls: gym.spaces.Discrete(cls.N_ACTIONS)),
-    "arc": (VehicleArc,
-            lambda cls: gym.spaces.MultiDiscrete([cls.N_STEER, cls.N_ARC])),
+    "continuous": (
+        VehicleContinuous,
+        lambda cls: gym.spaces.Box(low=np.array([-1., -1.]),
+                                   high=np.array([1., 1.]),
+                                   dtype=np.float32)),
+    "disc_accel": (
+        VehicleDiscAccel,
+        lambda cls: gym.spaces.Discrete(cls.N_ACTIONS)),
+    "arc": (
+        VehicleArc,
+        lambda cls: gym.spaces.MultiDiscrete([cls.N_STEER, cls.N_ARC])),
 }
 _DEFAULT_TYPE = "continuous"
 
+
 class ParkingEnv(gym.Env):
+    """轻量级停车环境（支持动态难度 & 高效碰撞检测）"""
     metadata = {"render_modes": ["human", "rgb_array"], "name": "ParkingEnv"}
 
+    # ---------------------------------------------------------------------
+    # 初始化
+    # ---------------------------------------------------------------------
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
-        # ---------- basic params ---------------------------------------
-        self.dt = cfg.get("timestep", 0.1)
-        self.max_steps = cfg.get("max_steps", 500)
+
+        # ---------------- Basic Params ----------------------------------
+        self.dt         = cfg.get("timestep",   0.1)
+        self.max_steps  = cfg.get("max_steps",  500)
         self.render_mode = cfg.get("render_mode", "human")
-        # ---------- geometry ------------------------------------------
-        self.wheelbase = 3.0; self.front_hang = 1.0
-        self.rear_hang = 1.0; self.car_width = 2.0
-        self.car_length = self.wheelbase + self.front_hang + self.rear_hang
+
+        # ---------------- Vehicle Geometry ------------------------------
+        self.wheelbase   = 3.0
+        self.front_hang  = 1.0
+        self.rear_hang   = 1.0
+        self.car_width   = 2.0
+        self.car_length  = self.wheelbase + self.front_hang + self.rear_hang
         self.parking_length, self.parking_width = 5.5, 2.3
-        # ---------- vehicle -------------------------------------------
-        self.max_steer = math.radians(30.0)
-        self.max_speed = cfg.get("max_speed", 3.0)
+
+        # ---------------- Vehicle Kinematics ----------------------------
+        self.max_steer   = math.radians(28.0)
+        self.max_speed   = cfg.get("max_speed", 3.0)
         self.vehicle_type = cfg.get("vehicle_type", _DEFAULT_TYPE)
         VehicleCls, space_fn = _VEHICLE_REGISTRY[self.vehicle_type]
-        self.vehicle = VehicleCls(wheelbase=self.wheelbase, width=self.car_width,
-                                  front_hang=self.front_hang, rear_hang=self.rear_hang,
-                                  max_steer=self.max_steer, max_speed=self.max_speed,
+        self.vehicle = VehicleCls(wheelbase=self.wheelbase,
+                                  width=self.car_width,
+                                  front_hang=self.front_hang,
+                                  rear_hang=self.rear_hang,
+                                  max_steer=self.max_steer,
+                                  max_speed=self.max_speed,
                                   dt=self.dt)
         self.action_space = space_fn(VehicleCls)
-        # ---------- lidar ---------------------------------------------
-        lidar_cfg = {"range_min": 0.5,
-                     "max_range": cfg.get("lidar_max_range", 30.0),
-                     "angle_range": 360, "num_beams": 72,
-                     "noise": False, "std": 0.05, "angle_std": 0.5,
-                     "position_offset": (0.0, 0.0)}
+
+        # ---------------- Lidar -----------------------------------------
+        lidar_cfg = dict(range_min=0.5,
+                         max_range=cfg.get("lidar_max_range", 30.0),
+                         angle_range=360,
+                         num_beams=72,
+                         noise=False,
+                         std=0.05,
+                         angle_std=0.5,
+                         position_offset=(0.0, 0.0))
         self.lidar_max_range = lidar_cfg["max_range"]
-        self.lidar = Lidar2D(lidar_cfg)
-        state_low = [-1., -1., 0., -1., -1.]
-        state_high = [1., 1., 1., 1., 1.]
+        self.lidar           = Lidar2D(lidar_cfg)
+        state_low  = [-1., -1., 0., -1., -1., -1., -1.]   # 自车状态(速度/弧长、偏转角)与目标车位观测(距离/方位/朝向差)
+        state_high = [ 1.,  1., 1.,  1.,  1., -1., -1.]
         self.observation_space = gym.spaces.Box(
-            low=np.array([0.] * lidar_cfg["num_beams"] + state_low, np.float32),
+            low=np.array([0.] * lidar_cfg["num_beams"] + state_low,  np.float32),
             high=np.array([self.lidar_max_range] * lidar_cfg["num_beams"] + state_high, np.float32),
             dtype=np.float32)
-        # ---------- scenario & render ---------------------------------
-        cfg_defaults = {"world_size": 30.0, "scenario_mode": "random",
-                        "min_obstacles": 3, "max_obstacles": 8,
-                        "min_obstacle_size": 1.0, "max_obstacle_size": 10.0}
+
+        # ---------------- Scenario & Render -----------------------------
+        cfg_defaults = dict(world_size=30.0,
+                            scenario_mode="random",
+                            min_obstacles=3,
+                            max_obstacles=8,
+                            min_obstacle_size=1.0,
+                            max_obstacle_size=10.0,
+                            row_count_range=(1, 4),
+                            occupy_prob=0.2,
+                            ego_target_max_dist=30,
+                            gap=4.0,
+                            wall_thickness=0.15)
         self.cfg = {**cfg_defaults, **cfg,
                     "parking_length": self.parking_length,
-                    "parking_width": self.parking_width,
-                    "car_length": self.car_length,
-                    "car_width": self.car_width,}
-        self.scenario = ScenarioManager(self.cfg)
-        self.renderer = PygameRenderer() if self.render_mode == "human" else None
-        # ---------- runtime state -------------------------------------
-        self._level = cfg.get("level", 1)
+                    "parking_width":  self.parking_width,
+                    "car_length":     self.car_length,
+                    "car_width":      self.car_width}
+        self.scenario  = ScenarioManager(self.cfg)
+        self.renderer  = PygameRenderer() if self.render_mode == "human" else None
+
+        # ---------- difficulty table -----------------------------
+        # 0 ←───→ 10
+        self.dist_levels  = np.linspace(2.0, 0.25, 11)            # m
+        self.angle_levels = np.radians(np.linspace(36, 3, 11))    # rad
+        self.level        = int(np.clip(cfg.get("difficulty_level", 0), 0, 10))
+        self.success_dist  = float(self.dist_levels[self.level])
+        self.success_angle = float(self.angle_levels[self.level])
+
+        # ---------- 缓存 ----------------------------------------------------
+        self.vehicle_poly = self.vehicle.get_shapely_polygon()
+        self._radar: Optional[np.ndarray] = None  # 一步只计算一次雷达
+        self._collision_thresholds: np.ndarray = np.empty(self.lidar.num_beams, dtype=np.float32)
+        self._init_vehicle_collision_thresholds()
+
+        # ---------- 运行时状态 ---------------------------------------------
+        self._success_history = deque(maxlen=300)   # 成功/失败（bool）
+        self.episode_success  = False
+        self.episode_reward   = 0.0                  # 仍可保留奖励统计
         self._reset_internal_buffers()
 
+    # ------------------------------------------------------------------
+    # Gym API
+    # ------------------------------------------------------------------
+    def reset(self, *, seed: Optional[int] = None, options=None, scenario_idx: Optional[int] = None):
+        # ------ 难度自适应 ------
+        if hasattr(self, "episode_success"):
+            self._success_history.append(self.episode_success)
+            self._adjust_difficulty()
 
-    def reset(self, *, seed: Optional[int] = None, options=None,
-              scenario_idx: Optional[int] = None):
-        if seed is not None: self.seed(seed)
+        self.episode_success = False
+        self.episode_reward  = 0.0
+        self._radar          = None
+
+        if seed is not None:
+            self.seed(seed)
         (self.ego_info,
          self.target_info,
-         self.obstacles) = self.scenario.init(seed=seed, scenario_idx=scenario_idx)
+         self.obstacles) = self.scenario.init(seed=seed, scenario_idx=scenario_idx, current_level=self.level)
         self.current_scenario = scenario_idx
         self.vehicle.reset_state(*self.ego_info)
+        self.step_count   = 0
+        self.prev_dist    = float("inf")
         self.vehicle_poly = self.vehicle.get_shapely_polygon()
-        self.prev_dist = float("inf"); self.step_count = 0
         self._update_obstacle_geometries()
         return self._get_observation(), {}
 
     def step(self, action):
+        # ---- 运动学更新 --------
         self.vehicle.state, _ = self.vehicle.step(action)
-        self.vehicle_poly = self.vehicle.get_shapely_polygon()
-        obs = self._get_observation()
+        self.vehicle_poly = self.vehicle.get_shapely_polygon()   # ⭐ 新增
+        self._radar = None  # 清除上一帧缓存
+
+        # ---- 观测、奖励、终止 -----
+        obs   = self._get_observation()
         term, trunc, coll = self._check_termination()
         reward = self._calc_reward(term, coll)
-        self.step_count += 1
+
+        if term and not coll:
+            self.episode_success = True
+        self.episode_reward += reward
+        self.step_count      += 1
+
         if self.renderer and self.step_count % 5 == 0:
             self.render()
         return obs, reward, term, trunc, {"collision": coll}
 
-    def seed(self, seed=None):
-        random.seed(seed); np.random.seed(seed)
+    # ------------------------------------------------------------------
+    # Difficulty adjustment
+    # ------------------------------------------------------------------
+    def _adjust_difficulty(self):
+        if len(self._success_history) < self._success_history.maxlen:
+            return
+        success_rate = sum(self._success_history) / len(self._success_history)
+        if success_rate > 0.5 and self.level < 10:
+            self.level += 1
+            print(f"[Difficulty ↑] level={self.level}  success_rate={success_rate:.2%}")
+        elif success_rate < 0.3 and self.level > 0:
+            self.level -= 1
+            print(f"[Difficulty ↓] level={self.level}  success_rate={success_rate:.2%}")
+        self.success_dist  = float(self.dist_levels[self.level])
+        self.success_angle = float(self.angle_levels[self.level])
+        self._success_history.clear()
 
-    def close(self):
-        if self.renderer: self.renderer.render = lambda *a, **k: None
+    # ------------------------------------------------------------------
+    # Cached lidar scan
+    # ------------------------------------------------------------------
+    def _scan_radar(self, x: float, y: float, yaw: float) -> np.ndarray:
+        """懒加载激光数据，避免同一帧重复扫描"""
+        if self._radar is None:
+            self._radar = self.lidar.scan(x, y, yaw)
+        return self._radar
 
+    # ------------------------------------------------------------------
+    # Observation / Reward / Termination
+    # ------------------------------------------------------------------
+    def _get_observation(self):
+        x, y, yaw = self.vehicle.get_pose_center()
+        radar_norm = self._scan_radar(x, y, yaw) / self.lidar_max_range
+
+        dx, dy   = self.target_info[0] - x, self.target_info[1] - y
+        dist     = math.hypot(dx, dy)
+        rel_ang  = _normalize_angle(math.atan2(dy, dx) - yaw)
+        heading  = _normalize_angle(self.target_info[2] - yaw)
+
+        heading_sin, heading_cos = math.sin(heading), math.cos(heading)
+        bearing_sin, bearing_cos = math.sin(rel_ang), math.cos(rel_ang)
+        state = np.array([
+            self.vehicle.state[3] / self.max_speed,     # 车辆速度
+            self.vehicle.state[4] / self.max_steer,     # 转角
+            min(dist, 10.0) / 10.0,           # 距离≤10m 线性，>10m clip
+            bearing_sin, bearing_cos,                          # 相对方位
+            heading_sin, heading_cos,                          # 相对朝向
+        ], np.float32)
+        return np.concatenate([radar_norm.astype(np.float32), state])
+
+    def _calc_reward(self, terminated: bool, collided: bool) -> float:
+        if terminated and not collided:
+            n_switch = self.vehicle.switch_count
+            return max(1.0 - 0.1 * n_switch, 0.3)
+        return 0.0
+
+    def _check_termination(self):
+        x, y, yaw = self.vehicle.get_pose_center()
+        tx, ty, tyaw = self.target_info
+
+        # ---- 成功 —— 距离 + 朝向 ----
+        if math.hypot(tx - x, ty - y) < self.success_dist and \
+           abs(_normalize_angle(yaw - tyaw)) < self.success_angle:
+            return True, False, False
+
+        # ---- 碰撞 ----
+        if np.any(self._scan_radar(x, y, yaw) < self._collision_thresholds):
+            return True, False, True
+
+        # ---- 其他失败 ----
+        if math.hypot(tx - x, ty - y) > self.cfg["world_size"] * 1.2:
+            return False, True, True  # Out of bounds
+        if self.step_count >= self.max_steps:
+            return False, True, False  # Timeout
+        return False, False, False
+
+    # ------------------------------------------------------------------
+    # Collision threshold (pre‑computed once)
+    # ------------------------------------------------------------------
+    def _init_vehicle_collision_thresholds(self):
+        """
+        计算每条激光束与车辆外轮廓的最近交点距离，结果保存在
+        self._collision_thresholds (shape = [num_beams], 单位: 米)。
+
+        用途：在 _check_termination() 中快速判定是否车体-障碍碰撞
+        ——只需比较当前雷达距离 < 该阈值即可。
+        """
+        # ------------------------------------------------------------
+        # 1. 构造车辆轮廓线段集合 (N,4):  x1,y1,x2,y2
+        # ------------------------------------------------------------
+        cx, cy, _ = self.vehicle.get_pose_center()        # 雷达原点
+        v_poly = self.vehicle_poly                        # 已由 reset() 生成
+        coords = list(v_poly.exterior.coords)
+        segs = np.asarray(
+            [[x1, y1, x2, y2] for (x1, y1), (x2, y2) in zip(coords[:-1], coords[1:])],
+            dtype=np.float32,
+        )
+        if segs.shape[0] == 0:  # 理论不会发生，安全检查
+            self._collision_thresholds = np.full(self.lidar.num_beams, self.lidar_max_range, np.float32)
+            return
+
+        # ------------------------------------------------------------
+        # 2. 计算所有激光束方向的单位向量
+        # ------------------------------------------------------------
+        # self.lidar.angles ∈ [-π, π]，与 scan() 内部保持一致
+        dir_cos = np.cos(self.lidar.angles, dtype=np.float32)
+        dir_sin = np.sin(self.lidar.angles, dtype=np.float32)
+
+        # ------------------------------------------------------------
+        # 3. 射线-线段批量求交，优先走 Numba 快路径
+        # ------------------------------------------------------------
+        from lidar import USING_NUMBA
+        if USING_NUMBA:
+            # 动态导入函数以避免在无 Numba 环境下报错
+            from lidar import _ray_trace_batch  # type: ignore
+            dists = _ray_trace_batch(
+                float(cx), float(cy),
+                dir_cos, dir_sin,
+                segs,
+                float(self.lidar_max_range),
+            )
+        else:
+            # --- 纯 Python 回退 ------------------------------------------------
+            r_max = float(self.lidar_max_range)
+            dists = np.full(self.lidar.num_beams, r_max, dtype=np.float32)
+            for i in range(self.lidar.num_beams):
+                cx_dir, sx_dir = dir_cos[i], dir_sin[i]
+                best = r_max
+                for x1, y1, x2, y2 in segs:
+                    denom = cx_dir * (y2 - y1) - sx_dir * (x2 - x1)  # r × s
+                    if abs(denom) < 1e-12:
+                        continue  # 平行
+                    t = ((x1 - cx) * sx_dir - (y1 - cy) * cx_dir) / denom
+                    if t < 0.0 or t > 1.0:
+                        continue  # 不在线段内
+                    u = ((x1 - cx) * (y2 - y1) - (y1 - cy) * (x2 - x1)) / denom
+                    if u <= 0.0:
+                        continue  # 射线反向
+                    if u < best:
+                        best = u
+                dists[i] = best
+
+        # ------------------------------------------------------------
+        # 4. 写入阈值并加一点裕度 (5%)，防止浮点误差漏检
+        # ------------------------------------------------------------
+        self._collision_thresholds = (dists).astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # Obstacle helpers
+    # ------------------------------------------------------------------
     def _reset_internal_buffers(self):
         self.ego_info = self.target_info = None
         self.obstacles: List[List[Tuple[float, float]]] = []
-        self.obstacle_geoms, self.vehicle_poly = [], None
+        self.obstacle_geoms = []
         self.current_scenario = ""
-        self.step_count = 0; self.prev_dist = float("inf")
+        self.step_count       = 0
 
     def _update_obstacle_geometries(self):
         from shapely.geometry import Polygon, LineString, Point
         self.obstacle_geoms = []
         for obs in self.obstacles:
-            if len(obs) >= 3: self.obstacle_geoms.append(Polygon(obs))
-            elif len(obs) == 2: self.obstacle_geoms.append(LineString(obs))
-            elif len(obs) == 1: self.obstacle_geoms.append(Point(obs[0]))
+            if len(obs) >= 3:
+                self.obstacle_geoms.append(Polygon(obs))
+            elif len(obs) == 2:
+                self.obstacle_geoms.append(LineString(obs))
+            elif len(obs) == 1:
+                self.obstacle_geoms.append(Point(obs[0]))
         self.lidar.update_obstacles(self.obstacle_geoms)
 
-    def _calc_reward(self, terminated, collised):
-        if terminated and not collised:
-            n = self.vehicle.switch_count
-            return max(1.0 - 0.1 * n, 0.3)
-        return 0.0
+    # ------------------------------------------------------------------
+    # Misc
+    # ------------------------------------------------------------------
+    def seed(self, seed=None):
+        random.seed(seed)
+        np.random.seed(seed)
 
-    def _get_observation(self):
-        x, y, yaw = self.vehicle.get_pose_center()
-        radar = self.lidar.scan(x, y, yaw) / self.lidar_max_range
-        dx, dy = self.target_info[0] - x, self.target_info[1] - y
-        dist = math.hypot(dx, dy)
-        rel_ang = _normalize_angle(math.atan2(dy, dx) - yaw)
-        heading = _normalize_angle(self.target_info[2] - yaw)
-        state = np.array([self.vehicle.state[3] / self.max_speed,
-                          self.vehicle.state[4] / self.max_steer,
-                          dist / self.cfg["world_size"],
-                          rel_ang / math.pi,
-                          heading / math.pi], np.float32)
-        return np.concatenate([radar.astype(np.float32), state])
-
-    def _check_termination(self):
-        """
-        返回值包括 成功或失败、超时、碰撞
-        """
-        x, y, yaw = self.vehicle.get_pose_center()
-        tx, ty, tyaw = self.target_info
-        dist = math.hypot(tx - x, ty - y)
-        angle_diff = abs(_normalize_angle(yaw - tyaw))
-        if dist < 2.0 and angle_diff < math.radians(30):    # 是否达成停车条件 此处可以用观测代替
-            return True, False, False
-        
-        if self.vehicle_poly and any(self.vehicle_poly.intersects(o)    # 是否碰撞
-                                     for o in self.obstacle_geoms):
-            return True, False, True
-        if math.hypot(self.target_info[0]-x, self.target_info[1]-y) > self.cfg["world_size"]*1: # 出界
-            return False, True, True
-        if self.step_count >= self.max_steps:   # 超时
-            return False, True, False
-        return False, False, False
+    def close(self):
+        if self.renderer:
+            self.renderer.render = lambda *a, **k: None
 
     def render(self):
+        if not self.renderer:  # rgb_array 模式 return raw array
+            return
         x, y, yaw = self.vehicle.get_pose_center()
         self.renderer.render(
             vehicle_poly=self.vehicle_poly,

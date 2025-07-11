@@ -15,12 +15,11 @@ class CustomMLP(BaseFeaturesExtractor):
     def forward(self, x):
         return self.net(x)
 
-
 class RadarConvFusion(BaseFeaturesExtractor):
     def __init__(self, observation_space, features_dim=128):
         super().__init__(observation_space, features_dim)
         obs_dim = observation_space.shape[0]
-        assert obs_dim == 77, "Expected 72 lidar + 5 state inputs"
+        assert obs_dim == 79, "Expected 72 lidar + 7 state inputs"
 
         # 雷达数据用 circular padding 卷积处理
         self.radar_conv = nn.Sequential(
@@ -28,11 +27,11 @@ class RadarConvFusion(BaseFeaturesExtractor):
             nn.ReLU(),
             nn.Conv1d(8, 16, kernel_size=3, padding=1, padding_mode="circular"),
             nn.ReLU(),
-            nn.Flatten(),  # 输出 shape = [batch, 16×72]
+            nn.Flatten(),  # 输出 shape = [batch, 8×72]
         )
 
         self.linear = nn.Sequential(
-            nn.Linear(16 * 72 + 5, 256),
+            nn.Linear(16 * 72 + 7, 256),
             nn.ReLU(),
             nn.Linear(256, features_dim),
             nn.ReLU(),
