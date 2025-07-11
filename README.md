@@ -38,9 +38,13 @@ python Test.py --model="./runs/ppo_arc/checkpoints/your_checkpoint.zip" --play
 python manual_arc_env.py
 ```
 
-下面展示了该仓库实现的的随机泊车场景
+下面展示了几个该仓库实现的的随机泊车场景
 
 <div align="center">
-<img src=figures/random_env_example.png width=60% />
+<img src=figures/random_env_example1.png width=60% />
+</div>
+
+<div align="center">
+<img src=figures/random_env_example3.png width=60% />
 </div>
 
