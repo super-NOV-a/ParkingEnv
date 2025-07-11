@@ -27,7 +27,7 @@ def parse_args():
     p.add_argument("--vecnorm", action="store_true", help="enable VecNormalize")
     p.add_argument("--render", choices=["none", "human", "rgb_array"], default="none")
     p.add_argument("--play", action="store_true", help="run & render one episode")
-    p.add_argument("--episodes", type=int, default=10)
+    p.add_argument("--episodes", type=int, default=200)
     p.add_argument("--vehicle_type", default="arc")
     p.add_argument("--timestep", type=float, default=0.1)
     p.add_argument("--max_steps", type=int, default=500)
@@ -37,8 +37,8 @@ def parse_args():
 ## 纯评估模式
 # python Test.py --model "runs/your_model/final.zip"
 
-## 评估完再播放一个轨迹
-# python Test.py --model "runs/your_model/final.zip" --render human --play
+## 评估完再进行渲染查看效果
+# python Test.py --model "runs/your_model/final.zip" --play
 ## -----------------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -51,7 +51,7 @@ if __name__ == "__main__":
         scenario_mode="empty",
         data_dir="./pygame_input_features_new_withinBEV_no_parallel_parking",
         lidar_max_range=15.0,
-        difficulty_level=5,
+        difficulty_level=10,
         world_size=40.0,
         occupy_prob=0.3,
         gap=4.0,
@@ -86,6 +86,15 @@ if __name__ == "__main__":
         model, vec_env, n_eval_episodes=args.episodes, deterministic=True
     )
     print(f"Evaluation: {mean_r:.2f} ± {std_r:.2f} over {args.episodes} episodes")
+
+    # 统计成功率
+    raw_env = vec_env.envs[0].env  # 拿到 ParkingEnv 实例
+    successes = list(raw_env._success_history)
+    n = len(successes)
+    n_success = sum(successes)
+    n_fail = n - n_success
+    success_rate = n_success / n if n else 0.0
+    print(f"✅ 成功: {n_success}，❌ 失败: {n_fail}，✔️ 成功率: {success_rate:.2%}")
 
     # Optional playback
     if args.play:
