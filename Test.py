@@ -11,6 +11,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from parking_env_pkg import ParkingEnv
 from custom_policy_model import RadarConvFusion, CustomMLP
+import numpy as np
+from vehicles.vehicle_arc import VehicleArc     # 用于获取离散尺寸
 
 
 def make_env_fn(**cfg):
@@ -27,7 +29,7 @@ def parse_args():
     p.add_argument("--vecnorm", action="store_true", help="enable VecNormalize")
     p.add_argument("--render", choices=["none", "human", "rgb_array"], default="none")
     p.add_argument("--play", action="store_true", help="run & render one episode")
-    p.add_argument("--episodes", type=int, default=200)
+    p.add_argument("--episodes", type=int, default=100)
     p.add_argument("--vehicle_type", default="arc")
     p.add_argument("--timestep", type=float, default=0.1)
     p.add_argument("--max_steps", type=int, default=500)
@@ -47,18 +49,24 @@ if __name__ == "__main__":
     parking_cfg = dict(
         timestep=args.timestep,
         max_steps=args.max_steps,
-        render_mode=None,
-        scenario_mode="empty",
-        data_dir="./pygame_input_features_new_withinBEV_no_parallel_parking",
-        lidar_max_range=15.0,
-        difficulty_level=10,
-        world_size=40.0,
-        occupy_prob=0.3,
-        gap=4.0,
-        wall_thickness=0.15,
-        model_ckpt=args.model,
-        policy_class="RadarConvFusion",
         vehicle_type="arc",
+        render_mode=None,
+        scenario_mode="file",     # file random  empty  box
+        data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
+        lidar_max_range=30.0,
+        world_size=40.0,
+        difficulty_level=10,    # 环境难度，对于停车位容忍程度和障碍密度有影响
+
+        gap_base = 4,
+        gap_step = 0.2,  # 总共十个level
+        gap_min = 2,
+        occupy_prob_base = 0,
+        occupy_prob_step = 0.05,
+        occupy_prob_max = 0.5,
+
+        wall_thickness=0.1,
+        model_ckpt=args.model,
+        policy_class="CustomMLP",     # 可选 "CustomMLP" 或 "RadarConvFusion"
     )
 
     # VecEnv wrapper
@@ -81,20 +89,68 @@ if __name__ == "__main__":
 
     model: PPO = PPO.load(args.model, vec_env, policy_kwargs=policy_kwargs)
 
-    # Evaluation
-    mean_r, std_r = evaluate_policy(
-        model, vec_env, n_eval_episodes=args.episodes, deterministic=True
-    )
-    print(f"Evaluation: {mean_r:.2f} ± {std_r:.2f} over {args.episodes} episodes")
+    # ───────────────────────── 自定义评估循环 ─────────────────────────
+    n_steer, n_arc = VehicleArc.N_STEER, VehicleArc.N_ARC
+    action_hist = np.zeros((n_steer, n_arc), dtype=np.int64)
 
-    # 统计成功率
-    raw_env = vec_env.envs[0].env  # 拿到 ParkingEnv 实例
-    successes = list(raw_env._success_history)
-    n = len(successes)
-    n_success = sum(successes)
-    n_fail = n - n_success
-    success_rate = n_success / n if n else 0.0
-    print(f"✅ 成功: {n_success}，❌ 失败: {n_fail}，✔️ 成功率: {success_rate:.2%}")
+    successes = 0
+    for ep in range(args.episodes):
+        reset_out = vec_env.reset()
+        obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out   # 1-或 2-tuple 兼容
+        done = False
+
+        while not done:
+            act, _ = model.predict(obs, deterministic=True)   # shape = (1,2)
+            s_idx, a_idx = map(int, act[0])
+            action_hist[s_idx, a_idx] += 1
+
+            step_out = vec_env.step(act)
+            if len(step_out) == 5:           # Gymnasium 原生 → 5 项
+                obs, reward, dones, truncs, infos = step_out
+                done = bool(dones[0] or truncs[0])
+            else:                            # DummyVecEnv 简化 → 4 项
+                obs, reward, dones, infos = step_out
+                done = bool(dones[0])
+
+            info = infos[0]
+
+        # “成功” → episode 终止且没有碰撞
+        if not info.get("collision", False):
+            successes += 1
+
+    success_rate = successes / args.episodes
+    print(f"\n✅ 成功: {successes}/{args.episodes}   ✔️ 成功率: {success_rate:.2%}")
+
+    # ── 打印动作分布 ─────────────────────────────────────────────────────────
+    total_steps = action_hist.sum()
+    steer_counts = action_hist.sum(axis=1)
+    arc_counts   = action_hist.sum(axis=0)
+
+    print("\n── 动作分布统计 ──")
+    print("Steer-idx  次数    占比")
+    for i, c in enumerate(steer_counts):
+        print(f"{i:9d}  {c:6d}  {c/total_steps:6.2%}")
+
+    print("\nArc-idx    次数    占比")
+    for j, c in enumerate(arc_counts):
+        print(f"{j:9d}  {c:6d}  {c/total_steps:6.2%}")
+
+    import matplotlib.pyplot as plt
+
+    # … 成功率打印后 ↓↓↓
+    fig1 = plt.figure()
+    plt.bar(range(len(steer_counts)), steer_counts)
+    plt.xlabel("Steer-idx");  plt.ylabel("Count")
+    plt.title("Distribution of Steer Indices")
+    plt.tight_layout()
+
+    fig2 = plt.figure()
+    plt.bar(range(len(arc_counts)), arc_counts)
+    plt.xlabel("Arc-idx");    plt.ylabel("Count")
+    plt.title("Distribution of Arc Indices")
+    plt.tight_layout()
+    plt.show() # 交互模式直接弹窗
+
 
     # Optional playback
     if args.play:

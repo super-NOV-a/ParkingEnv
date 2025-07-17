@@ -65,8 +65,8 @@ if USING_NUMBA:
 # ------------------------------------------------------------------
 class Lidar2D:
     def __init__(self, cfg: dict):
-        self.range_min = cfg.get('range_min', 0.2)
-        self.range_max = cfg.get('max_range', 10.0)
+        self.min_range = cfg.get('range_min', 0.2)
+        self.max_range = cfg.get('max_range', 10.0)
         self.num_beams = cfg.get('num_beams', 72)
         ang_range_deg = cfg.get('angle_range', 360.0)
         self.noise = cfg.get('noise', False)
@@ -76,7 +76,7 @@ class Lidar2D:
         self.angles = np.linspace(-math.radians(ang_range_deg) / 2,
                                   math.radians(ang_range_deg) / 2,
                                   self.num_beams, dtype=np.float32)
-        self.ranges = np.full(self.num_beams, self.range_max, dtype=np.float32)
+        self.ranges = np.full(self.num_beams, self.max_range, dtype=np.float32)
         self._segments = np.empty((0, 4), dtype=np.float32)  # (N,4) x1,y1,x2,y2
 
     # --------------------------------------------------------------
@@ -110,7 +110,7 @@ class Lidar2D:
     # --------------------------------------------------------------
     def scan(self, x: float, y: float, yaw: float) -> np.ndarray:
         if self._segments.shape[0] == 0:
-            self.ranges.fill(self.range_max)
+            self.ranges.fill(self.max_range)
             return self.ranges.copy()
 
         angs = self.angles + yaw
@@ -120,12 +120,12 @@ class Lidar2D:
         dir_s = np.sin(angs, dtype=np.float32)
 
         if USING_NUMBA:
-            dists = _ray_trace_batch(x, y, dir_c, dir_s, self._segments, self.range_max)
+            dists = _ray_trace_batch(x, y, dir_c, dir_s, self._segments, self.max_range)
         else:
-            dists = np.full(self.num_beams, self.range_max, dtype=np.float32)
+            dists = np.full(self.num_beams, self.max_range, dtype=np.float32)
             for i in range(self.num_beams):
                 cx, sx = dir_c[i], dir_s[i]
-                best = self.range_max
+                best = self.max_range
                 for x1, y1, x2, y2 in self._segments:
                     denom = (x2 - x1) * sx - (y2 - y1) * cx
                     if abs(denom) < 1e-12:
@@ -141,7 +141,7 @@ class Lidar2D:
                 dists[i] = best
         if self.noise and self.std > 0:
             dists += np.random.normal(0.0, self.std, size=self.num_beams)
-        np.clip(dists, self.range_min, self.range_max, out=dists)
+        np.clip(dists, self.min_range, self.max_range, out=dists)
         self.ranges[:] = dists.astype(np.float32)
         return self.ranges.copy()
 

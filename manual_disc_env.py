@@ -1,65 +1,47 @@
-'''manual_disc_env.py – 手动控制 VehicleDiscAccel 模型进行泊车实验
-====================================================================
-该脚本允许使用键盘控制基于离散动作网格（3x3 的速度 × 转向组合）的 `VehicleDiscAccel` 模型。
+"""
+manual_disc_env.py ─ 手动键盘控制 VehicleDiscAccel
+--------------------------------------------------
+← / →  : 调整转向索引  (15 档，-30°…+30°)
+C      : 转向回中 (idx 7, 0°)
 
-动作网格：
-    STEER_GRID = (-1, 0, +1) × 最大转角
-    SPEED_GRID = (+1, 0, −1) × 最大速度
+↑ / ↓  : 调整加速度  (-1 / 0 / +1 m/s²)
+X      : 加速度归零 (idx 1, 0 m/s²)
 
-控制方式：
-    ← / →：改变转向索引（向左 / 向右）
-    ↑ / ↓：改变速度索引（前进 / 后退）
-    C：转向归中
-    X：速度归零（滑行）
-    SPACE：重复上一次动作
-    R：重置当前回合
-    ESC：退出程序
+SPACE  : 重复上一帧动作
+R      : 提前重置当前回合
+ESC    : 退出
+"""
 
-运行方式：
-    python manual_disc_env.py            # 启动带界面窗口控制
-    python manual_disc_env.py --headless # 无界面测试逻辑运行
-'''
-
-import argparse
-import time
-import numpy as np
-import pygame
+import argparse, time, math, pygame, numpy as np
 from parking_env_pkg import ParkingEnv
-# from vehicles import STEER_GRID, SPEED_GRID
-STEER_GRID = (-1.0, 0.0, 1.0)
-SPEED_GRID = (1.0, 0.0, -1.0)
+from vehicles.vehicle_disc_accel import (
+    VehicleDiscAccel, STEER_CHOICES, ACC_CHOICES,
+)
 
-def make_env(render: bool):
+N_STEER, N_ACC = VehicleDiscAccel.N_STEER, VehicleDiscAccel.N_ACC
+
+# ----------------------------------------------------------------- 环境构造
+def make_env(render=True):
     cfg = dict(
-        timestep=0.1,
-        max_steps=500,
-        lidar_max_range=15.0,
+        timestep=0.1, max_steps=500,
         render_mode="human" if render else "none",
         vehicle_type="disc_accel",
         scenario_mode="random",
-        data_dir="./pygame_input_features_new_withinBEV_no_parallel_parking",
-        manual=True,
-        world_size=30.0,
-        occupy_prob=0.5,
-        gap=4.0,
-        wall_thickness=0.1,
+        world_size=30.0, margin=1.0,
     )
     return ParkingEnv(cfg)
 
-
-def run(env: ParkingEnv, render: bool):
-    steer_idx = 1
-    speed_idx = 1
-    action_id = speed_idx * 3 + steer_idx
-    last_action = action_id
+# ----------------------------------------------------------------- 主循环
+def run(env: ParkingEnv, render=True):
+    # 起始：转向 idx=7 (0°)  加速度 idx=1 (0 m/s²)
+    steer_idx, acc_idx = 7, 1
+    last_action = steer_idx * N_ACC + acc_idx
 
     if render:
         pygame.init()
         pygame.display.set_caption("Parking – DiscAccel manual control")
-        from parking_env_pkg.render import PygameRenderer
-        renderer = PygameRenderer(screen_size=(800, 800))
-        screen = pygame.display.set_mode(renderer.screen_size)
-        clock = pygame.time.Clock()
+        screen = pygame.display.set_mode((800, 800))
+        clock  = pygame.time.Clock()
     else:
         screen = None
 
@@ -68,74 +50,77 @@ def run(env: ParkingEnv, render: bool):
         obs, _ = env.reset()
         terminated = truncated = False
         ep_reward = 0.0
-        start_t = time.time()
+        start_t   = time.time()
 
         while not (terminated or truncated):
+            # ---------- 事件处理 ----------
             for event in pygame.event.get() if screen else []:
                 if event.type == pygame.QUIT or (
                     event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
                 ):
                     running = False
                     env.close()
-                    if screen:
-                        pygame.quit()
+                    if screen: pygame.quit()
                     return
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-                    terminated = True
+                    terminated = True   # 提前结束回合
 
             keys = pygame.key.get_pressed() if screen else []
 
             if screen and keys:
+                # SPACE ⇒ 重复上一动作
                 if keys[pygame.K_SPACE]:
                     action_id = last_action
                 else:
+                    # ← / → 调整转向 idx
                     if keys[pygame.K_LEFT]:
-                        steer_idx = max(0, steer_idx - 1)
+                        steer_idx = min(N_STEER - 1, steer_idx + 1)
                     if keys[pygame.K_RIGHT]:
-                        steer_idx = min(2, steer_idx + 1)
+                        steer_idx = max(0, steer_idx - 1)
                     if keys[pygame.K_c]:
-                        steer_idx = 1
+                        steer_idx = 7  # 中位 0°
 
+                    # ↑ / ↓ 调整加速度 idx
                     if keys[pygame.K_UP]:
-                        speed_idx = max(0, speed_idx - 1)
+                        acc_idx = 2    # +1 m/s²
                     if keys[pygame.K_DOWN]:
-                        speed_idx = min(2, speed_idx + 1)
+                        acc_idx = 0    # -1 m/s²
                     if keys[pygame.K_x]:
-                        speed_idx = 1
+                        acc_idx = 1    #  0 m/s²
 
-                    action_id = speed_idx * 3 + steer_idx
+                    action_id  = steer_idx * N_ACC + acc_idx
                     last_action = action_id
             else:
                 action_id = env.action_space.sample()
 
+            # ---------- 环境步进 ----------
             obs, reward, terminated, truncated, _ = env.step(action_id)
             ep_reward += reward
 
-            if terminated or truncated:
-                steer_idx = 1
-                speed_idx = 1
-                action_id = speed_idx * 3 + steer_idx
-                last_action = action_id
-                env.reset()
-
+            # ---------- 渲染 ----------
             if screen:
-                title = (
-                    f"Steer idx {steer_idx} ({STEER_GRID[steer_idx]:+0.0f})  |  "
-                    f"Speed idx {speed_idx} ({SPEED_GRID[speed_idx]:+0.0f})  |  AID {action_id}"
-                )
+                steer_deg = math.degrees(STEER_CHOICES[steer_idx])
+                acc_val   = ACC_CHOICES[acc_idx]
+                title = f"Steer idx {steer_idx:2d} ({steer_deg:+.0f}°) | " \
+                        f"Acc idx {acc_idx} ({acc_val:+.0f} m/s²) | " \
+                        f"AID {action_id}"
                 pygame.display.set_caption(title)
                 env.render()
                 clock.tick(30)
 
-        dur = time.time() - start_t
-        print(f"Episode finished in {dur:.1f}s; Reward = {ep_reward:.2f}")
+            # 回合结束后自动复位索引
+            if terminated or truncated:
+                steer_idx, acc_idx = 7, 1
+                last_action        = steer_idx * N_ACC + acc_idx
 
+        print(f"Episode finished in {time.time()-start_t:.1f}s; "
+              f"Reward = {ep_reward:.2f}")
 
+# ----------------------------------------------------------------- CLI
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--headless", action="store_true")
     return p.parse_args()
-
 
 if __name__ == "__main__":
     args = parse_args()

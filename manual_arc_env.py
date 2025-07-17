@@ -27,15 +27,23 @@ def make_env(render: bool):
     cfg = dict(
         timestep=0.1,
         max_steps=500,
-        lidar_max_range=15.0,
         render_mode="human" if render else "none",
         vehicle_type="arc",
         scenario_mode="random",
-        data_dir="./pygame_input_features_new_withinBEV_no_parallel_parking",
+        data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
         manual=True,
-        world_size=30.0,
-        occupy_prob=0.5,
-        gap=4.0,
+        lidar_max_range=30.0,
+        world_size=40.0,
+        difficulty_level=10,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
+
+        # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
+        # 不同等级之间难度差别大
+        gap_base = 4,
+        gap_step = 0.2,  # 总共十个level
+        gap_min = 2,
+        occupy_prob_base = 0.5,
+        occupy_prob_step = 0.05,
+        occupy_prob_max = 0.9,
         wall_thickness=0.1,
     )
     return ParkingEnv(cfg)

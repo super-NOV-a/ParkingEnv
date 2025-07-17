@@ -2,8 +2,10 @@ import math
 import numpy as np
 from vehicles.vehicle_base import VehicleBase, _normalize_angle
 
-STEER_DEG = list(range(-28, 29, 4))
+# STEER_DEG = list(range(-28, 29, 4))
+STEER_DEG = [-30, -24, -18, -12, -8, -5, -2, 0, 2, 5, 8, 12, 18, 24, 30]
 STEER_CHOICES = np.deg2rad(STEER_DEG).astype(np.float32)
+# ARC_CHOICES = np.array([-1.0, -0.25, -0.1, 0.1, 0.25, 1.0], dtype=np.float32)
 ARC_CHOICES = np.array([-1.0, -0.25, 0.25, 1.0], dtype=np.float32)
 
 try:
