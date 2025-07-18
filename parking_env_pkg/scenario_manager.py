@@ -139,15 +139,19 @@ class ScenarioManager:
             return self._generate_empty(current_level), None    # None 用于占位
         elif self.scenario_mode == "box":
             return self._generate_random_box(current_level), None
-        elif self.scenario_mode == "random_box":    # random 和 box 五五开
-            if np.random.random()>0.5:
+        elif self.scenario_mode == "random_box":
+            prob = np.random.random()
+            if prob <= 0.3:         # box   百分之三十
                 return self._generate_random_box(current_level), None
-            else:
+            elif prob <= 0.8:       # random百分之五十
                 return self._generate_random(current_level), None
+            elif prob <= 0.9:       # empty 百分之十
+                return self._generate_empty(current_level), None
+            else:                   # file  百分之十
+                return self._load_from_file(scenario_idx, self.energy)
         else:
             return self._generate_random(current_level), None
 
-        
 
     # ---------------------------------------------------------------------
     # Difficulty helpers
@@ -284,32 +288,45 @@ class ScenarioManager:
         # file_path = "C:\AI_Planner\RL\pygame_input_features_new_withinBEV_no_parallel_parking/1713602139487329202.json"
         with open(file_path, 'r') as file:
             data = json.load(file)
-        
+       
         nfm_origin = data['Frames']['0'].get("m_nfmOrigin", [0, 0])
         m_pathOrigin = data['Frames']['0']['PlanningRequest'].get("m_origin", [0, 0])
-        
+       
         # 提取自车信息（带坐标转换）
         # ── 1. ego pose (rear-axle) → world坐标 ───────────────────────────
         ego_data = data['Frames']['0']['PlanningRequest']['m_startPosture']['m_pose']
         ego_x = ego_data[0] + m_pathOrigin[0] - nfm_origin[0]
         ego_y = ego_data[1] + m_pathOrigin[1] - nfm_origin[1]
         ego_yaw = _normalize_angle(ego_data[2])
-
+ 
         # 🚗  rear-axle → geometric centre
         ego_x, ego_y = _shift_forward(ego_x, ego_y, ego_yaw)
+        ego_x += np.random.uniform(-2, 2)
+        ego_y += np.random.uniform(-2, 2)
+        ego_yaw += np.random.uniform(-0.2, 0.2)     # 十几度
         ego_info = [ego_x, ego_y, ego_yaw]
-
+ 
+         # 构建目标车位坐标变换矩阵
+        cos_e = np.cos(ego_info[2])
+        sin_e = np.sin(ego_info[2])
+        ex, ey = ego_info[0], ego_info[1]
+        trans_matrix_ego = np.array([
+            [cos_e, sin_e, -ex * cos_e - ey * sin_e],
+            [-sin_e, cos_e, ex * sin_e - ey * cos_e],
+            [0, 0, 1]
+        ])
+ 
         # 提取目标信息（带坐标转换）
         # ── 2. target slot pose (rear-axle) → world ──────────────────────
         tgt = data['Frames']['0']['PlanningRequest']['m_targetArea']['m_targetPosture']['m_pose']
         tgt_x = tgt[0] + m_pathOrigin[0] - nfm_origin[0]
         tgt_y = tgt[1] + m_pathOrigin[1] - nfm_origin[1]
         tgt_yaw = _normalize_angle(tgt[2])
-
+ 
         # 🅿️  rear-axle → slot geometric centre
         tgt_x, tgt_y = _shift_forward(tgt_x, tgt_y, tgt_yaw)
         target_info = [tgt_x, tgt_y, tgt_yaw]
-        
+       
         # 构建目标车位坐标变换矩阵
         cos_t = np.cos(target_info[2])
         sin_t = np.sin(target_info[2])
@@ -326,12 +343,12 @@ class ScenarioManager:
         if self.wall_thickness > 0.0:
             t = self.wall_thickness
             half_W = self.world_size / 2.0
-
+ 
             # 让 target 几何中心处于世界正方形中心
             tx, ty = target_info[0], target_info[1]          # 目标车位中心
             xmin, xmax = tx - half_W, tx + half_W
             ymin, ymax = ty - half_W, ty + half_W
-
+ 
             Wll = [
                 # 下边墙
                 [(xmin, ymin), (xmax, ymin), (xmax, ymin + t), (xmin, ymin + t)],
@@ -346,36 +363,47 @@ class ScenarioManager:
         for obj in data['Frames']['0']['NfmAggregatedPolygonObjects']:
             if 'nfmPolygonObjectNodes' not in obj:
                 continue
-                
+            
             polygon = []
             for point in obj['nfmPolygonObjectNodes']:
                 # 应用坐标转换
                 x = point['m_x'] + m_pathOrigin[0] - nfm_origin[0]
                 y = point['m_y'] + m_pathOrigin[1] - nfm_origin[1]
                 polygon.append([x, y])
-            
+           
             # 转换到目标车位坐标系
             polygon_arr = np.array(polygon).T
             homogenous = np.vstack([polygon_arr, np.ones(polygon_arr.shape[1])])
             transformed = trans_matrix @ homogenous
             target_coords = transformed[:2, :].T
-            
+ 
+            # 转换到ego车辆坐标系
+            transformed_ego = trans_matrix_ego @ homogenous
+            ego_coords = transformed_ego[:2, :].T
+           
             # 使用正确的停车位尺寸
             vehicle_x_min, vehicle_x_max = -self.parking_length/2, self.parking_length/2
             vehicle_y_min, vehicle_y_max = -self.parking_width/2, self.parking_width/2
-            
+           
             # 检查是否在目标车位边界内
             in_target = False
             for x, y in target_coords:
-                if (vehicle_x_min <= x <= vehicle_x_max and 
+                if (vehicle_x_min <= x <= vehicle_x_max and
                     vehicle_y_min <= y <= vehicle_y_max):
                     in_target = True
                     break
-                    
+ 
+            # 检查是否在其实车辆边界内
+            for x, y in ego_coords:
+                if (vehicle_x_min <= x <= vehicle_x_max and
+                    vehicle_y_min <= y <= vehicle_y_max):
+                    in_target = True
+                    break
+                   
             # 只保留目标车位外的障碍物
             if not in_target:
                 obstacles.append(polygon)
-        
+       
         return ego_info, target_info, obstacles
 
     # ------------------------------------------------------------------

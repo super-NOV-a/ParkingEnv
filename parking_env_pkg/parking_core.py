@@ -191,7 +191,7 @@ class ParkingEnv(gym.Env):
 
         obs   = self._get_observation()
         term, trunc, coll = self._check_termination()
-        reward = self._calc_reward(term, coll, self.energy)
+        reward = self._calc_reward(term, trunc, coll, self.energy)
 
         if term and not coll:
             self.episode_success = True
@@ -238,7 +238,7 @@ class ParkingEnv(gym.Env):
     def _get_observation(self):
         x, y, yaw = self.vehicle.get_pose_center()
         radar = self._scan_radar(x, y, yaw)
-        self._obs_buf[:self.lidar.num_beams] = radar / self.lidar.max_range
+        self._obs_buf[:self.lidar.num_beams] = radar / self.lidar.max_range  # (radar - self._collision_thresholds)
 
         dx, dy = self.target_info[0] - x, self.target_info[1] - y
         dist   = math.hypot(dx, dy)
@@ -260,17 +260,19 @@ class ParkingEnv(gym.Env):
         self._obs_buf[self.lidar.num_beams:] = self._state_buf
         return self._obs_buf
         
-    def _calc_reward(self, terminated: bool, collided: bool, energy: bool) -> float:
+    def _calc_reward(self, terminated: bool, trunc: bool, collided: bool, energy: bool) -> float:
         if energy and self.is_file:
             energy = get_energy(self.energy_nodes, self.vehicle.state[:3])  
             energy_reward = (energy - 500) / (1000 * 300)
             if terminated and not collided:
                 n_switch = self.vehicle.switch_count
-                return max(1.0 - 0.1 * n_switch, 0.3) + energy_reward
+                return max(1.0 - 0.05 * n_switch, 0.3) + energy_reward
             return energy_reward
         if terminated and not collided:
             n_switch = self.vehicle.switch_count
-            return max(0.1 * (10 - n_switch), 0.3)*(1+0.1*self.level)   # 对于更高难度鼓励智能体
+            return max(0.05 * (20 - n_switch), 0.3)*(1+0.1*self.level)   # 对于更高难度鼓励智能体
+        if trunc or collided:
+            return -0.05
         return 0.0
 
     def _check_termination(self):
@@ -284,11 +286,11 @@ class ParkingEnv(gym.Env):
 
         # ---- 碰撞 ----
         if np.any(self._scan_radar(x, y, yaw) < self._collision_thresholds):
-            return True, False, True
+            return True, False, True   # 碰撞不结束的话需要强制车辆移动到碰撞前才对，不然会强制一直扣分
 
         # ---- 其他失败 ----
         if math.hypot(tx - x, ty - y) > self.cfg["world_size"]:
-            return False, True, True  # Out of bounds
+            return False, True, False  # Out of bounds
         if self.step_count >= self.max_steps:
             return False, True, False  # Timeout
         return False, False, False

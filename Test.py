@@ -29,7 +29,7 @@ def parse_args():
     p.add_argument("--vecnorm", action="store_true", help="enable VecNormalize")
     p.add_argument("--render", choices=["none", "human", "rgb_array"], default="none")
     p.add_argument("--play", action="store_true", help="run & render one episode")
-    p.add_argument("--episodes", type=int, default=100)
+    p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--vehicle_type", default="arc")
     p.add_argument("--timestep", type=float, default=0.1)
     p.add_argument("--max_steps", type=int, default=500)
@@ -51,11 +51,11 @@ if __name__ == "__main__":
         max_steps=args.max_steps,
         vehicle_type="arc",
         render_mode=None,
-        scenario_mode="file",     # file random  empty  box
+        scenario_mode="random_box",     # file random  empty  box  random_box
         data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
         lidar_max_range=30.0,
         world_size=40.0,
-        difficulty_level=10,    # 环境难度，对于停车位容忍程度和障碍密度有影响
+        difficulty_level=9,    # 环境难度，对于停车位容忍程度和障碍密度有影响
 
         gap_base = 4,
         gap_step = 0.2,  # 总共十个level

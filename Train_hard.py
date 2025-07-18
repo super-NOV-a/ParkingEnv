@@ -168,7 +168,7 @@ if __name__ == "__main__":
         max_speed=3.0,          # 在离散轨迹中用于表示映射到[-1,1]的轨迹长度
         lidar_max_range=30.0,   # fixed
         world_size=40.0,        # fixed
-        difficulty_level=6,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
+        difficulty_level=9,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
 
         # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
         # 不同等级之间难度差别大-----------该文件提供很难的random环境！！！！！-----------------
@@ -182,7 +182,7 @@ if __name__ == "__main__":
         wall_thickness=0.1,
         energy=False,    # True, False
         # 训练模型管理项 ↓↓↓
-        logdir="fc6", # 可以此处指定log_dir！
+        logdir="fc7", # 可以此处指定log_dir！
 
         # 这里写好要导入的模型，然后在命令行继续训练：python Train.py --resume
         # model_ckpt = "\\runs\ppo_arc_empty_fc\\best_model\\best_model.zip","runs\ppo_arc_empty_cnn\checkpoints\ppo_arc_1000000_steps.zip"

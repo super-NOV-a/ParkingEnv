@@ -56,12 +56,11 @@ import argparse
 from datetime import datetime
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import (
-    BaseCallback,
     CheckpointCallback,
     EvalCallback,
     ProgressBarCallback,
@@ -71,48 +70,9 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.vec_env import VecNormalize
-from stable_baselines3.common.logger import configure
 
 from parking_env_pkg import ParkingEnv  # unified env with vehicle_type param
 from custom_policy_model import RadarConvFusion, CustomMLP
-
-class SuccessRateCallback(BaseCallback):
-    """Logs average success rate and mean level to TensorBoard."""
-
-    def __init__(self, verbose: int = 0, max_envs_logged: int = 4):
-        super().__init__(verbose)
-        self.max_envs_logged = max_envs_logged
-
-    def _on_step(self) -> bool:
-        return True
-
-    def _on_rollout_end(self) -> None:
-        total_successes = 0
-        total_trials = 0
-        levels: List[int] = []
-
-        # unwrap VecEnv → raw ParkingEnv
-        for idx, env in enumerate(self.training_env.envs):  # type: ignore[attr-defined]
-            raw = env
-            while hasattr(raw, "env"):
-                raw = raw.env
-            if hasattr(raw, "_success_history"):
-                hist = raw._success_history
-                total_successes += sum(hist)
-                total_trials += len(hist)
-            if hasattr(raw, "level") and idx < self.max_envs_logged:
-                levels.append(raw.level)
-
-        success_rate = (
-            total_successes / total_trials if total_trials else 0.0
-        )
-        mean_level = sum(levels) / len(levels) if levels else 0.0
-
-        self.logger.record("rollout/success_rate", success_rate)
-        self.logger.record("rollout/mean_level", mean_level)
-
-        if self.verbose:
-            self.logger.dump(self.num_timesteps)
 
 ###############################################################################
 # Helpers
@@ -156,7 +116,7 @@ def parse_args():
     )
 
     # –– SB3 hyper‑parameters ––
-    p.add_argument("--total_timesteps", type=int, default=10_000_000)
+    p.add_argument("--total_timesteps", type=int, default=4_000_000)
     p.add_argument("--n_envs", type=int, default=8)
     p.add_argument("--learning_rate", type=float, default=3e-4)
     p.add_argument("--batch_size", type=int, default=64)
@@ -199,34 +159,29 @@ if __name__ == "__main__":
         timestep=args.timestep,
         max_steps=args.max_steps,
         render_mode=None if args.render_mode == "none" else args.render_mode,
-        scenario_mode="random_box",     # file random box empty  random_box
-        data_dir=".\Train_data_energy\pygame_input_features_new_withinBEV_no_parallel_parking",   # ← 指向你的 .json 文件夹
-        energy_data_dir=".\Train_data_energy\Energy_train",   # ← 指向你的 .json 文件夹
+        scenario_mode="random",     # file
+        data_dir=".\pygame_input_features_new_withinBEV_no_parallel_parking",   # ← 指向你的 .json 文件夹
         max_speed=3.0,          # 在离散轨迹中用于表示映射到[-1,1]的轨迹长度
-        lidar_max_range=30.0,
+        lidar_max_range=15.0,
+
+        min_obstacles=0,         # useless
+        max_obstacles=10,
+        row_count_range=(1, 4), # \useless 上述参数在genarate_random_legacy中使用了，目前是无用参数
+
         world_size=40.0,
-        difficulty_level=0,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
-
-        # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
-        # 不同等级之间难度差别大
-        gap_base = 4,       # 在random中使用的内容
-        gap_step = 0.2,     # 总共十个level  gap与occupy_prob根据level在min/max之间调节
-        gap_min = 2,
-        occupy_prob_base = 0,
-        occupy_prob_step = 0.05,
-        occupy_prob_max = 0.5,
-
+        occupy_prob=0.,          # 初级课程
+        gap=4.0,
         wall_thickness=0.1,
-        energy=False,    # True, False
+
         # 训练模型管理项 ↓↓↓
-        logdir="cnn0", # 可以此处指定log_dir！
+        logdir="fc2", # 可以此处指定log_dir！
 
         # 这里写好要导入的模型，然后在命令行继续训练：python Train.py --resume
         # model_ckpt = "\\runs\ppo_arc_empty_fc\\best_model\\best_model.zip","runs\ppo_arc_empty_cnn\checkpoints\ppo_arc_1000000_steps.zip"
-        model_ckpt=None, # "runs\ppo_arc_box_fc6\checkpoints\ppo_arc_4000000_steps.zip",
+        model_ckpt=None,#".\\runs\ppo_arc_empty_cnn\checkpoints\ppo_arc_1000000_steps.zip",  # 如需加载模型路径填绝对路径或 pathlib.Path 对象
 
         # 自定义模型类型，见--custom_policy_model.py
-        policy_class="RadarConvFusion",  # 可选 "CustomMLP" 或 "RadarConvFusion" 全连接比cnn速度快 效果好
+        policy_class="CustomMLP",  # 可选 "CustomMLP" 或 "RadarConvFusion"
         
     )
     # 训练时保存模型和log的位置可以在 parking_cfg 中指定 log_dir，
@@ -288,8 +243,7 @@ if __name__ == "__main__":
 
     # ── Model (resume or fresh) ────────────────────────────────────────────────────
 
-    # logic priority: 1) --resume → reload latest ckpt  
-    #                 2) --load_model → warm-start
+    # logic priority: 1) --resume → reload latest ckpt  2) --load_model → warm-start
     #                 3) fresh init
     latest_ckpt = max((args.logdir / "checkpoints").glob("*.zip"),
                       key=lambda p: int(p.stem.split("_")[-2]) if "_" in p.stem else 0,
@@ -298,12 +252,9 @@ if __name__ == "__main__":
     if args.resume and latest_ckpt is not None:
         print(f"[Resume] Continue training from {latest_ckpt}")
         model = PPO.load(latest_ckpt, env=env, device=device, policy_kwargs=policy_kwargs)
-        model.set_logger(configure(str(tb_dir), ["stdout", "tensorboard"]))
-
     elif args.load_model is not None:
         print(f"[Init]  Load weights from {args.load_model}")
         model = PPO.load(args.load_model, env=env, device=device, policy_kwargs=policy_kwargs)
-        model.set_logger(configure(str(tb_dir), ["stdout", "tensorboard"]))
     else:
         model = PPO(
             policy="MlpPolicy",
@@ -333,8 +284,6 @@ if __name__ == "__main__":
         save_vecnormalize=args.vecnorm,
     )
 
-    success_cb = SuccessRateCallback(verbose=0)
-
     if EVAL:
         eval_env = make_vec_env(make_env_fn(args.vehicle_type, **parking_cfg), n_envs=1, seed=args.seed + 1)
         if args.vecnorm:
@@ -358,13 +307,13 @@ if __name__ == "__main__":
     if EVAL:
         model.learn(
             total_timesteps=args.total_timesteps,
-            callback=[ckpt_cb, success_cb, eval_cb, pbar_cb],
+            callback=[ckpt_cb, eval_cb, pbar_cb],
             progress_bar=False,
         )
     else:
         model.learn(
             total_timesteps=args.total_timesteps,
-            callback=[ckpt_cb, success_cb, pbar_cb],
+            callback=[ckpt_cb, pbar_cb],
             progress_bar=False,
         )
 

@@ -29,7 +29,7 @@ def make_env(render: bool):
         max_steps=500,
         render_mode="human" if render else "none",
         vehicle_type="arc",
-        scenario_mode="random",
+        scenario_mode="box",
         data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
         manual=True,
         lidar_max_range=30.0,
