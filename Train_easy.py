@@ -199,7 +199,7 @@ if __name__ == "__main__":
         timestep=args.timestep,
         max_steps=args.max_steps,
         render_mode=None if args.render_mode == "none" else args.render_mode,
-        scenario_mode="random_box",     # file random box empty  random_box
+        scenario_mode="file",     # file random box empty  random_box
         data_dir=".\Train_data_energy\pygame_input_features_new_withinBEV_no_parallel_parking",   # ← 指向你的 .json 文件夹
         energy_data_dir=".\Train_data_energy\Energy_train",   # ← 指向你的 .json 文件夹
         max_speed=3.0,          # 在离散轨迹中用于表示映射到[-1,1]的轨迹长度
@@ -217,9 +217,9 @@ if __name__ == "__main__":
         occupy_prob_max = 0.5,
 
         wall_thickness=0.1,
-        energy=False,    # True, False
+        energy=True,    # True, False
         # 训练模型管理项 ↓↓↓
-        logdir="cnn0", # 可以此处指定log_dir！
+        logdir="fc0_energy", # 可以此处指定log_dir！
 
         # 这里写好要导入的模型，然后在命令行继续训练：python Train.py --resume
         # model_ckpt = "\\runs\ppo_arc_empty_fc\\best_model\\best_model.zip","runs\ppo_arc_empty_cnn\checkpoints\ppo_arc_1000000_steps.zip"
