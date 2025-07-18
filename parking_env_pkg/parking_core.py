@@ -37,8 +37,11 @@ class ParkingEnv(gym.Env):
 
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
+        # ======================== 能量场 ========================
         self.energy       = cfg.get("energy", False)      # 是否使用能量场
         self.energy_nodes = None
+        self.energy_last = 0
+        self.energy_total = 0                             #初始能量
         # ======================== 基本仿真参数 ========================
         self.dt         = cfg.get("timestep",   0.1)     # 时间步长
         self.max_steps  = cfg.get("max_steps",  500)     # 最大步数
@@ -101,12 +104,12 @@ class ParkingEnv(gym.Env):
         cfg_defaults = dict(
             world_size=30.0,
             scenario_mode="random",
-            min_obstacles=3,
-            max_obstacles=8,
-            min_obstacle_size=1.0,
-            max_obstacle_size=10.0,
-            row_count_range=(1, 4),
-            ego_target_max_dist=30,
+            # min_obstacles=3,  # not used
+            # max_obstacles=8,
+            # min_obstacle_size=1.0,
+            # max_obstacle_size=10.0,
+            # row_count_range=(1, 4),
+            # ego_target_max_dist=30,
             wall_thickness=0.15
         )
         self.cfg = {**cfg_defaults, **cfg,
@@ -169,9 +172,26 @@ class ParkingEnv(gym.Env):
             (self.ego_info, self.target_info, self.obstacles) ,jr_pkgs = \
                 self.scenario.init(seed=seed, scenario_idx=scenario_idx, current_level=self.level, energy=self.energy)
             self.energy_nodes = jr_pkgs
+ 
+            #   能量场初始化
+            self.energy_total = 0
+ 
+            ego_centor_x, ego_centor_y, ego_centor_yaw = self.ego_info[:3]
+            ego_rear_x, ego_rear_y = _shift_forward(ego_centor_x, ego_centor_y, ego_centor_yaw)  # 目前ego是中心点，处理成后轴中心点
+            target_centor_x, target_centor_y, target_centor_yaw = self.target_info[:3]
+            target_rear_x, target_rear_y = _shift_forward(target_centor_x, target_centor_y, target_centor_yaw)  # 目前ego是中心点，处理成后轴中心点
+ 
+           
+            self.energy_last = get_energy(self.energy_nodes, [ego_rear_x, ego_rear_y, ego_centor_yaw])
+            self.energy_target = get_energy(self.energy_nodes, [target_rear_x, target_rear_y, target_centor_yaw])
+            self.energy_offset = self.energy_target - self.energy_last
+            # print("--------------energy_last:", self.energy_last)
+            # print("---------------------energy_target :", self.energy_target )
+            # print("-----------------------energy_offset :", self.energy_offset )
         else:
             (self.ego_info, self.target_info, self.obstacles), _ = \
                 self.scenario.init(seed=seed, scenario_idx=scenario_idx, current_level=self.level)
+            
         self.current_scenario = scenario_idx
         self.vehicle.reset_state(*self.ego_info)
         self.step_count   = 0
@@ -260,13 +280,19 @@ class ParkingEnv(gym.Env):
         self._obs_buf[self.lidar.num_beams:] = self._state_buf
         return self._obs_buf
         
-    def _calc_reward(self, terminated: bool, trunc: bool, collided: bool, energy: bool) -> float:
-        if energy and self.is_file:
-            energy = get_energy(self.energy_nodes, self.vehicle.state[:3])  
-            energy_reward = (energy - 500) / (1000 * 300)
+    def _calc_reward(self, terminated: bool, trunc: bool, collided: bool, need_energy: bool) -> float:
+        if need_energy and self.is_file:
+            centor_x, centor_y, centor_yaw = self.vehicle.state[:3]
+            rear_x, rear_y = _shift_forward(centor_x, centor_y, centor_yaw)  # 目前ego是中心点，处理成后轴中心点
+            energy = get_energy(self.energy_nodes, [rear_x, rear_y, self.vehicle.state[2]])
+            # energy_reward = (energy - self.energy_last) / (500 * 3)
+            energy_reward = (energy - self.energy_last) / (self.energy_offset) / 3
+            self.energy_last =  energy
+            self.energy_total += energy_reward
+
             if terminated and not collided:
                 n_switch = self.vehicle.switch_count
-                return max(1.0 - 0.05 * n_switch, 0.3) + energy_reward
+                return max(1.0 - 0.1 * n_switch, 0.3) + energy_reward
             return energy_reward
         if terminated and not collided:
             n_switch = self.vehicle.switch_count
@@ -290,7 +316,7 @@ class ParkingEnv(gym.Env):
 
         # ---- 其他失败 ----
         if math.hypot(tx - x, ty - y) > self.cfg["world_size"]:
-            return False, True, False  # Out of bounds
+            return False, True, True  # Out of bounds
         if self.step_count >= self.max_steps:
             return False, True, False  # Timeout
         return False, False, False
@@ -422,3 +448,8 @@ class ParkingEnv(gym.Env):
             parking_length=self.parking_length,
             parking_width=self.parking_width,
         )
+
+def _shift_forward(x: float, y: float, yaw: float, dx: float=-1.425):
+    """沿 yaw 正方向把 (x, y) 平移 dx。"""
+    return x + dx * np.cos(yaw), y + dx * np.sin(yaw)
+ 
