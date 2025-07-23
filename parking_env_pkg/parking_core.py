@@ -9,6 +9,7 @@ from .utils import _normalize_angle
 from vehicles.vehicle_continuous import VehicleContinuous
 from vehicles.vehicle_disc_accel import VehicleDiscAccel
 from vehicles.vehicle_arc import VehicleArc
+from vehicles.vehicle_incremental import VehicleIncremental
 from lidar import Lidar2D
 from .scenario_manager import ScenarioManager
 from .render import PygameRenderer
@@ -28,6 +29,11 @@ _VEHICLE_REGISTRY = {
     "arc": (
         VehicleArc,
         lambda cls: gym.spaces.MultiDiscrete([cls.N_STEER, cls.N_ARC])),
+    "incremental": (
+        VehicleIncremental,
+        lambda cls: gym.spaces.Box(low=np.array([-1., -1.]),
+                                   high=np.array([1., 1.]),
+                                   dtype=np.float32)),
 }
 _DEFAULT_TYPE = "continuous"
 
@@ -49,8 +55,8 @@ class ParkingEnv(gym.Env):
 
         # ======================== 车辆参数配置 ========================
         self.wheelbase   = 3.0
-        self.front_hang  = 1.0
-        self.rear_hang   = 1.0
+        self.front_hang  = 0.925
+        self.rear_hang   = 1.025    # 车长4.95
         self.car_width   = 2.0
         self.car_length  = self.wheelbase + self.front_hang + self.rear_hang
         self.parking_length, self.parking_width = 5., 2.
@@ -92,11 +98,13 @@ class ParkingEnv(gym.Env):
         self.lidar = Lidar2D(lidar_cfg)
 
         # ======================== 状态空间与观测空间 ========================
-        state_low  = [-1., -1., 0., -1., -1., -1., -1.,  -1., -1.]
-        state_high = [ 1.,  1., 1.,  1.,  1.,  1.,  1.,   1.,  1.]
+        # 观测维度从 9 → 11，加入 direction 与 switch_frac
+        state_low  = [-1., -1., 0., -1., -1., -1., -1.,  -1., -1., -1., 0.]
+        state_high = [ 1.,  1., 1.,  1.,  1.,  1.,  1.,   1.,  1.,  1., 1.]
+
         self.observation_space = gym.spaces.Box(
-            low=np.array([0.] * lidar_cfg["num_beams"] + state_low, np.float32),
-            high=np.array([lidar_cfg["max_range"]] * lidar_cfg["num_beams"] + state_high, np.float32),
+            low=np.array([-1.] * lidar_cfg["num_beams"] + state_low, np.float32),   # 雷达距离减碰撞阈值
+            high=np.array([1.] * lidar_cfg["num_beams"] + state_high, np.float32),
             dtype=np.float32
         )
 
@@ -130,20 +138,23 @@ class ParkingEnv(gym.Env):
 
         # ======================== 碰撞检测缓存 ========================
         self.vehicle_poly = self.vehicle.get_shapely_polygon()
-        self._radar: Optional[np.ndarray] = None
+        # self._radar: Optional[np.ndarray] = None         # 原始射线距离
+        self._clearance: Optional[np.ndarray] = None     # radar - threshold
         self._collision_thresholds: np.ndarray = np.empty(self.lidar.num_beams, dtype=np.float32)
         self._init_vehicle_collision_thresholds()
 
-        # ======================== 动作编码查找表 ========================
+        # ======================== 离散动作编码查找表 ========================
         if self.N_STEER > 1:
             self._steer_norm_lut = np.linspace(-1.0, 1.0, self.N_STEER, dtype=np.float32)
         if self.N_ARC > 1:
             self._arc_norm_lut = np.linspace(-1.0, 1.0, self.N_ARC, dtype=np.float32)
 
         # ======================== 观测缓存 ========================
-        self._state_buf = np.empty(9, dtype=np.float32)
-        self._obs_buf   = np.empty(self.lidar.num_beams + 9, dtype=np.float32)
-        self._prev_action = np.array([self.N_STEER // 2, self.N_ARC // 2], dtype=np.int32)
+        self._state_buf = np.empty(len(state_low), dtype=np.float32)
+        self._obs_buf   = np.empty(self.lidar.num_beams + len(state_low), dtype=np.float32)
+        # self._prev_action = np.array([self.N_STEER // 2, self.N_ARC // 2], dtype=np.int32)
+        # 2) _prev_action 用 float 保存
+        self._prev_action = np.zeros(2, dtype=np.float32)
 
         # ======================== 学习/评估统计 ========================
         self._success_history = deque(maxlen=500)
@@ -164,7 +175,7 @@ class ParkingEnv(gym.Env):
 
         self.episode_success = False
         self.episode_reward  = 0.0
-        self._radar          = None
+        self._clearance = None
 
         if seed is not None:
             self.seed(seed)
@@ -202,12 +213,9 @@ class ParkingEnv(gym.Env):
         return self._get_observation(), {}
 
     def step(self, action):
-        # 记录当前动作索引 (array)
-        curr_act = np.asarray(action, dtype=np.int32).copy()
-
+        self._clearance = None      # 在懒加载中重新读写
         self.vehicle.state, _ = self.vehicle.step(action)
         self.vehicle_poly = self.vehicle.get_shapely_polygon()
-        self._radar = None
 
         obs   = self._get_observation()
         term, trunc, coll = self._check_termination()
@@ -222,7 +230,7 @@ class ParkingEnv(gym.Env):
             self.render()
 
         # ⚠️ 更新 prev_action 供下一步观测使用
-        self._prev_action = curr_act
+        self._prev_action = np.asarray(action, dtype=np.float32)  # 不再 cast int32
         return obs, reward, term, trunc, {"collision": coll}
 
     # ------------------------------------------------------------------
@@ -247,18 +255,22 @@ class ParkingEnv(gym.Env):
     # Cached lidar scan
     # ------------------------------------------------------------------
     def _scan_radar(self, x: float, y: float, yaw: float) -> np.ndarray:
-        """懒加载激光数据，避免同一帧重复扫描"""
-        if self._radar is None:
-            self._radar = self.lidar.scan(x, y, yaw)
-        return self._radar
+        """
+        懒加载净空距（雷达距离减去车身轮廓阈值）。
+        结果缓存到 ``self._clearance``，同一帧仅计算一次。
+        """
+        if self._clearance is None:
+            radar = self.lidar.scan(x, y, yaw)                       # 原始射线距离
+            self._clearance = radar - self._collision_thresholds     # 可正可负
+        # return self._clearance
 
     # ------------------------------------------------------------------
     # Observation / Reward / Termination
     # ------------------------------------------------------------------
     def _get_observation(self):
         x, y, yaw = self.vehicle.get_pose_center()
-        radar = self._scan_radar(x, y, yaw)
-        self._obs_buf[:self.lidar.num_beams] = radar / self.lidar.max_range  # (radar - self._collision_thresholds)
+        self._scan_radar(x, y, yaw)     ## 缓存供碰撞检测
+        self._obs_buf[:self.lidar.num_beams] = self._clearance / self.lidar.max_range
 
         dx, dy = self.target_info[0] - x, self.target_info[1] - y
         dist   = math.hypot(dx, dy)
@@ -269,17 +281,20 @@ class ParkingEnv(gym.Env):
         bearing_sin, bearing_cos = math.sin(rel_ang), math.cos(rel_ang)
         prev_s, prev_a = self._encode_prev_action()
 
+        direction = 1.0 if self.vehicle.state[3] >= 0 else -1.0
+        switch_frac = min(self.vehicle.switch_count / 20.0, 1.0)
         self._state_buf[:] = [
-            self.vehicle.state[3] / self.max_speed,
-            self.vehicle.state[4] / self.max_steer,
-            min(dist, 10.0) / 10.0,
-            bearing_sin, bearing_cos,
-            heading_sin, heading_cos,
-            prev_s, prev_a,
+            self.vehicle.state[3] / self.max_speed,     # speed
+            self.vehicle.state[4] / self.max_steer,     # steer
+            min(dist, 10.0) / 10.0,                     # dist to target
+            bearing_sin, bearing_cos,                   # relative target position sin\cos
+            heading_sin, heading_cos,                   # relative target heading sin\cos
+            prev_s, prev_a,                             # last_action
+            direction, switch_frac,                     # direction 
         ]
         self._obs_buf[self.lidar.num_beams:] = self._state_buf
         return self._obs_buf
-        
+     
     def _calc_reward(self, terminated: bool, trunc: bool, collided: bool, need_energy: bool) -> float:
         if need_energy and self.is_file:
             centor_x, centor_y, centor_yaw = self.vehicle.state[:3]
@@ -292,13 +307,16 @@ class ParkingEnv(gym.Env):
 
             if terminated and not collided:
                 n_switch = self.vehicle.switch_count
-                return max(1.0 - 0.1 * n_switch, 0.3) + energy_reward
+                return max(0.05 * (20 - n_switch), 0.3)*(1+0.1*self.level) + energy_reward
             return energy_reward
+        # 终点且无碰撞
         if terminated and not collided:
-            n_switch = self.vehicle.switch_count
-            return max(0.05 * (20 - n_switch), 0.3)*(1+0.1*self.level)   # 对于更高难度鼓励智能体
-        if trunc or collided:
-            return -0.05
+            # 统计换挡次数， ≤2 次不扣，之后每次-0.05   # 保底 0.3，避免负值
+            reward  = max(1.0 - 0.05 * max(0, self.vehicle.switch_count - 2), 0.3)                    
+            return reward * (1 + 0.1 * self.level)         # 难度加成
+        # 对于更高难度鼓励智能体,且减少换向惩罚
+        # if trunc or collided:
+        #     return -0.05
         return 0.0
 
     def _check_termination(self):
@@ -311,7 +329,9 @@ class ParkingEnv(gym.Env):
             return True, False, False
 
         # ---- 碰撞 ----
-        if np.any(self._scan_radar(x, y, yaw) < self._collision_thresholds):
+        if self._clearance is None:            # 极端情况：外部先调用 _check_termination()
+            self._scan_radar(x, y, yaw)
+        if np.any(self._clearance <= 0.0):
             return True, False, True   # 碰撞不结束的话需要强制车辆移动到碰撞前才对，不然会强制一直扣分
 
         # ---- 其他失败 ----
@@ -321,9 +341,13 @@ class ParkingEnv(gym.Env):
             return False, True, False  # Timeout
         return False, False, False
 
-    def _encode_prev_action(self) -> Tuple[float, float]:
-        s = self._steer_norm_lut[self._prev_action[0]] if self.N_STEER > 1 else 0.0
-        a = self._arc_norm_lut[self._prev_action[1]] if self.N_ARC > 1 else 0.0
+    def _encode_prev_action(self):
+        # 离散模式保持旧逻辑
+        if getattr(self.vehicle, "N_STEER", 1) > 1:      # 离散 steering  # VehicleArc
+            s = self._steer_norm_lut[int(self._prev_action[0])]
+            a = self._arc_norm_lut[int(self._prev_action[1])]
+        else:                                            # 连续 / 增量   continuous / incremental
+            s, a = float(self._prev_action[0]), float(self._prev_action[1])
         return s, a
 
     # ------------------------------------------------------------------
@@ -449,7 +473,6 @@ class ParkingEnv(gym.Env):
             parking_width=self.parking_width,
         )
 
-def _shift_forward(x: float, y: float, yaw: float, dx: float=-1.425):
+def _shift_forward(x: float, y: float, yaw: float, dx: float=-1.4):
     """沿 yaw 正方向把 (x, y) 平移 dx。"""
     return x + dx * np.cos(yaw), y + dx * np.sin(yaw)
- 

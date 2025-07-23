@@ -6,6 +6,7 @@ from vehicles.vehicle_base import VehicleBase, _normalize_angle
 STEER_DEG = [-30, -24, -18, -12, -8, -5, -2, 0, 2, 5, 8, 12, 18, 24, 30]
 STEER_CHOICES = np.deg2rad(STEER_DEG).astype(np.float32)
 # fmt: off
+# ARC_CHOICES   = np.array([-1.0, -0.25, -0.1, 0.1, 0.25, 1.0], dtype=np.float32)
 ARC_CHOICES   = np.array([-1.0, -0.25, 0.25, 1.0], dtype=np.float32)
 # fmt: on
 
@@ -48,7 +49,7 @@ class VehicleArc(VehicleBase):
 
     N_STEER, N_ARC = len(STEER_CHOICES), len(ARC_CHOICES)
     N_ACTIONS = N_STEER * N_ARC
-    MAX_STEER_DELTA_DEG = 20  # ° per macro‑step
+    MAX_STEER_DELTA_DEG = 15  # ° per macro‑step
 
     # --------------------------- constructor ---------------------------
     def __init__(self, **base_kwargs):

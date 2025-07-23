@@ -131,11 +131,11 @@ def unique_logdir(base: Path, resume: bool) -> Path:
             return cand
         idx += 1
 
-def make_env_fn(vehicle_type: str, **parking_cfg: Dict):
+def make_env_fn(**parking_cfg: Dict):
     """Factory producing *Monitor*‑wrapped envs for vectorisation."""
 
     def _init() -> gym.Env:
-        env = ParkingEnv({**parking_cfg, "vehicle_type": vehicle_type})
+        env = ParkingEnv({**parking_cfg})
         return Monitor(env)
 
     return _init
@@ -146,14 +146,6 @@ def make_env_fn(vehicle_type: str, **parking_cfg: Dict):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train PPO on flexible ParkingEnv")
-
-    # –– environment choice ––
-    p.add_argument(
-        "--vehicle_type",
-        choices=["continuous", "disc_accel", "arc"],
-        default="arc",
-        help="which vehicle dynamics to train",
-    )
 
     # –– SB3 hyper‑parameters ––
     p.add_argument("--total_timesteps", type=int, default=10_000_000)
@@ -196,15 +188,16 @@ if __name__ == "__main__":
 
     # ── Parking‑env configuration (common) ────────────────────────────
     parking_cfg = dict(
+        vehicle_type="arc", # incremental  arc
         timestep=args.timestep,
         max_steps=args.max_steps,
         render_mode=None if args.render_mode == "none" else args.render_mode,
-        scenario_mode="file",     # file random box empty  random_box
+        scenario_mode="parking",     # file random box empty  random_box  parking
         data_dir=".\Train_data_energy\pygame_input_features_new_withinBEV_no_parallel_parking",   # ← 指向你的 .json 文件夹
         energy_data_dir=".\Train_data_energy\Energy_train",   # ← 指向你的 .json 文件夹
         max_speed=3.0,          # 在离散轨迹中用于表示映射到[-1,1]的轨迹长度
-        lidar_max_range=30.0,
-        world_size=40.0,
+        lidar_max_range=15.0,
+        world_size=25.0,
         difficulty_level=0,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
 
         # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
@@ -217,21 +210,20 @@ if __name__ == "__main__":
         occupy_prob_max = 0.5,
 
         wall_thickness=0.1,
-        energy=True,    # True, False
+        energy=False,    # True, False
+        random_file_init = False, # 导入file时ego是否随机初始位置
         # 训练模型管理项 ↓↓↓
-        logdir="fc0_energy", # 可以此处指定log_dir！
+        logdir="fc0", # 可以此处指定log_dir！ 继续训练时会保存在此处
 
-        # 这里写好要导入的模型，然后在命令行继续训练：python Train.py --resume
-        # model_ckpt = "\\runs\ppo_arc_empty_fc\\best_model\\best_model.zip","runs\ppo_arc_empty_cnn\checkpoints\ppo_arc_1000000_steps.zip"
-        model_ckpt=None, # "runs\ppo_arc_box_fc6\checkpoints\ppo_arc_4000000_steps.zip",
+        # 这里写好要导入的模型，然后在命令行继续训练：python Train_easy.py 即可继续训练，不需要.zip
+        model_ckpt= ".\\runs\\ppo_arc_random_box_fc0\\checkpoints\\ppo_arc_10000000_steps",  # None
 
         # 自定义模型类型，见--custom_policy_model.py
-        policy_class="RadarConvFusion",  # 可选 "CustomMLP" 或 "RadarConvFusion" 全连接比cnn速度快 效果好
-        
+        policy_class="CustomMLP",  # 可选 "CustomMLP" 或 "RadarConvFusion" 有限的几个实验结果：全连接比cnn速度快 效果好
     )
     # 训练时保存模型和log的位置可以在 parking_cfg 中指定 log_dir，
     # 在命令行指定：python Train.py --logdir="runs/your_log_path"
-
+    args.vehicle_type = parking_cfg.get("vehicle_type")
     # ── auto-propagate model_ckpt from cfg if CLI didn’t specify ─────
     if args.load_model is None and parking_cfg.get("model_ckpt"):
         args.load_model = Path(parking_cfg["model_ckpt"])
@@ -260,7 +252,7 @@ if __name__ == "__main__":
 
     # ── Vectorised training env ───────────────────────────────────────
     env = make_vec_env(
-        make_env_fn(args.vehicle_type, **parking_cfg),
+        make_env_fn(**parking_cfg),
         n_envs=args.n_envs,
         seed=args.seed,
     )

@@ -20,7 +20,7 @@ import time
 import numpy as np
 import pygame
 from parking_env_pkg import ParkingEnv
-from vehicles.vehicle_arc import VehicleArc
+from vehicles.vehicle_arc import VehicleArc, ARC_CHOICES, STEER_CHOICES, STEER_DEG
 
 
 def make_env(render: bool):
@@ -29,29 +29,24 @@ def make_env(render: bool):
         max_steps=500,
         render_mode="human" if render else "none",
         vehicle_type="arc",
-        scenario_mode="box",
+        scenario_mode="parking",   # file random box empty  random_box  parking
         data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
         manual=True,
-        lidar_max_range=30.0,
-        world_size=40.0,
+        lidar_max_range=15.0,
+        world_size=25.0,
         difficulty_level=10,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
 
         # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
         # 不同等级之间难度差别大
-        gap_base = 4,
-        gap_step = 0.2,  # 总共十个level
-        gap_min = 2,
+        gap_base = 2,
+        gap_step = 0.17,  # 总共十个level
+        gap_min = 0.3,
         occupy_prob_base = 0.5,
         occupy_prob_step = 0.05,
-        occupy_prob_max = 0.9,
+        occupy_prob_max = 1,
         wall_thickness=0.1,
     )
     return ParkingEnv(cfg)
-
-
-STEER_DEG = list(range(-28, 29, 4))
-STEER_CHOICES = np.deg2rad(STEER_DEG).astype(np.float32)
-ARC_CHOICES = np.array([-1.0, -0.25, 0.25, 1.0], dtype=np.float32)
 
 
 def run(env: ParkingEnv, render: bool):

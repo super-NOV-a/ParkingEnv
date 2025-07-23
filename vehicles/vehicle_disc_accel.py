@@ -97,6 +97,10 @@ class VehicleDiscAccel(VehicleBase):
             )
 
         # 行驶方向、几何缓存
-        self.direction = 1 if self.state[3] >= 0 else -1
+            new_dir = 1 if self.state[3] >= 0 else -1
+        if self._last_direction is not None and new_dir != self._last_direction:
+            self.switch_count += 1
+        self._last_direction = new_dir
+        self.direction = new_dir
         self._update_geom_cache()
         return self.state, self.direction

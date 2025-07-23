@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import os
+import time
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
@@ -49,13 +50,13 @@ if __name__ == "__main__":
     parking_cfg = dict(
         timestep=args.timestep,
         max_steps=args.max_steps,
-        vehicle_type="arc",
+        vehicle_type="arc", # incremental  arc
         render_mode=None,
-        scenario_mode="random_box",     # file random  empty  box  random_box
-        data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
-        lidar_max_range=30.0,
-        world_size=40.0,
-        difficulty_level=9,    # 环境难度，对于停车位容忍程度和障碍密度有影响
+        scenario_mode="box",     # file random  empty  box  random_box  parking
+        data_dir="./Train_data_energy/hard",    # "./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
+        lidar_max_range=15.0,
+        world_size=25.0,
+        difficulty_level=10,    # 环境难度，对于停车位容忍程度和障碍密度有影响
 
         gap_base = 4,
         gap_step = 0.2,  # 总共十个level
@@ -162,7 +163,7 @@ if __name__ == "__main__":
             while not (done or truncated):
                 action, _ = model.predict(obs, deterministic=True)
                 obs, _, done, truncated, info = env.step(action)
-                
+                time.sleep(0.1)
                 collision = info.get("collision", False)
                 if done or truncated:
                     if done and not collision:

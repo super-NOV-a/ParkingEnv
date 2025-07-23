@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Demo – discrete arc‑length → incremental continuous actions (look‑ahead version)
-================================================================================
-**What's new?**  The micro‑planner that converts one discrete arc‑length action
-`(steer_idx, arc_idx)` into **N_fixed = round(1 s / dt) = 5** continuous actions
-now has *one‑step look‑ahead*. It receives the *next* discrete action as well and
-slightly blends towards it in the last micro‑steps. The goal is to avoid the
-sharp discontinuity that used to appear at each 1‑s boundary.
+Demo – discrete arc‑length → incremental continuous actions (look‑ahead + limited random)
+========================================================================================
+This version adds **steering‐rate–aware random scenario generation**:
+`--random N` now produces a sequence where successive steering commands differ
+by **≤ 30 deg**, matching the physical limit we imposed on `VehicleArc`. That
+makes the random test cases kinematically feasible, so the incremental solver
+has realistic input.
 
-* Steering: a cosine profile brings the wheel to the current target in the first
-  4 steps, the 5‑th step already starts moving towards the next target (20 % of
-  the required delta).
-* Longitudinal: still uses constant acceleration to match the current arc
-  length, but if the **sign of the next arc** differs, the last step’s
-  acceleration is smoothly reduced (50 %).
-
-Everything else – plotting, verbose logging, CLI – stays the same.
+There are *no* breaking API changes. Simply replace the old script and run it.
 """
 from __future__ import annotations
 
@@ -32,14 +25,15 @@ from vehicles.vehicle_arc import VehicleArc, STEER_CHOICES, ARC_CHOICES
 from vehicles.vehicle_incremental import VehicleIncremental
 
 # -----------------------------------------------------------------------------
-# Global parameters (single source of truth)
+# Global parameters
 # -----------------------------------------------------------------------------
-DEFAULT_DT = 0.2                     # [s] integrator step → 5 micro‑steps per 1 s
+DEFAULT_DT = 0.05                     # [s] integrator step → 5 micro‑steps per 1 s
 WHEEL_BASE = 3.0                    # [m]
 MAX_STEER_DEG = 30                  # [deg]
 MAX_STEER_RATE_DEG = 90             # [deg/s]
 MAX_SPEED = 3.0                     # [m/s]
 MAX_ACC = 4.0                       # [m/s²]
+STEER_LIMIT_RAD = math.radians(30)  # maximum delta between successive commands
 
 # -----------------------------------------------------------------------------
 # Helper – RMSE in xy space
@@ -50,7 +44,7 @@ def _rmse(traj_a: np.ndarray, traj_b: np.ndarray) -> float:
     return float(np.sqrt(((traj_a[:m, :2] - traj_b[:m, :2]) ** 2).sum(axis=1).mean()))
 
 # -----------------------------------------------------------------------------
-# Micro‑planner with 1‑step look‑ahead
+# Micro‑planner with 1‑step look‑ahead (unchanged)
 # -----------------------------------------------------------------------------
 
 def _arc_to_cont_cmds(
@@ -62,35 +56,29 @@ def _arc_to_cont_cmds(
 ) -> List[Tuple[float, float]]:
     """Convert the *current* discrete action to **exactly N_fixed continuous steps**.
 
-    The last micro‑step already points a little (20 %) towards the *next* target
-    if such information is provided. That anticipation greatly reduces jerk at
-    the macro‑step boundary without violating the 1‑s latency budget.
+    Uses one‑step look‑ahead to soften boundary discontinuities.
     """
     dt = veh.dt
     N_fixed = max(1, int(round(1.0 / dt)))          # 5 for dt = 0.2 s
 
-    # ----- steering targets ----------------------------------------------------
+    # ----- steering -----------------------------------------------------------
     steer_now = veh.state[4]
     steer_cur = STEER_CHOICES[steer_idx]
-    delta_cur = steer_cur - steer_now               # what we must achieve *now*
+    delta_cur = steer_cur - steer_now
 
     delta_next = 0.0
     if next_steer_idx is not None:
-        steer_next = STEER_CHOICES[next_steer_idx]
-        delta_next = steer_next - steer_cur         # where next action wants to go
+        delta_next = STEER_CHOICES[next_steer_idx] - steer_cur
 
-    # cosine easing that sums to 1
     cos_prof = 0.5 * (1 - np.cos(np.linspace(0, math.pi, N_fixed, dtype=np.float32)))
     cos_prof /= cos_prof.sum()
-
-    # Anticipation weight increases linearly and tops at 0.2 (= 20 %)
-    anticipate = np.linspace(0.0, 0.2, N_fixed, dtype=np.float32)
+    anticipate = np.linspace(0.0, 0.2, N_fixed, dtype=np.float32)     # 20 % look‑ahead
 
     steer_steps = delta_cur * cos_prof + anticipate * delta_next / N_fixed
     d_steer_norm = steer_steps / (veh.max_steer_rate * dt)
     d_steer_norm = np.clip(d_steer_norm, -1.0, 1.0)
 
-    # ----- longitudinal profile -----------------------------------------------
+    # ----- longitudinal -------------------------------------------------------
     s_target = ARC_CHOICES[arc_idx]
     v0 = veh.state[3]
     N = N_fixed
@@ -99,16 +87,42 @@ def _arc_to_cont_cmds(
     acc_norm = float(a_const / veh.max_acc)
     acc_profile = np.full(N_fixed, acc_norm, dtype=np.float32)
 
-    # If next arc changes sign, taper acceleration in the last step (50 %)
     if next_arc_idx is not None:
         s_next = ARC_CHOICES[next_arc_idx]
-        if s_next * s_target < 0:            # direction flip ahead
+        if s_next * s_target < 0:          # direction flip ahead
             acc_profile[-1] *= 0.5
 
     return list(zip(d_steer_norm.tolist(), acc_profile.tolist()))
 
 # -----------------------------------------------------------------------------
-# Simulation wrapper – now passes look‑ahead information
+# Random action generator with steering‑delta limit
+# -----------------------------------------------------------------------------
+
+def _generate_random_actions(n_steps: int, rng: random.Random) -> List[Tuple[int, int]]:
+    """Return a list of (steer_idx, arc_idx) with |Δsteer| ≤ 30 deg between steps."""
+    if n_steps <= 0:
+        return []
+
+    actions: List[Tuple[int, int]] = []
+
+    # first step unrestricted
+    s_idx_prev = rng.randrange(len(STEER_CHOICES))
+    a_idx_prev = rng.randrange(len(ARC_CHOICES))
+    actions.append((s_idx_prev, a_idx_prev))
+
+    for _ in range(n_steps - 1):
+        # candidate steering indexes within ±30°
+        candidates = [i for i, ang in enumerate(STEER_CHOICES)
+                      if abs(ang - STEER_CHOICES[s_idx_prev]) <= STEER_LIMIT_RAD]
+        s_idx = rng.choice(candidates)
+        # a_idx = rng.randrange(len(ARC_CHOICES))  # 
+        a_idx = rng.randrange(3, len(ARC_CHOICES))
+        actions.append((s_idx, a_idx))
+        s_idx_prev = s_idx
+    return actions
+
+# -----------------------------------------------------------------------------
+# Simulation wrapper – passes look‑ahead
 # -----------------------------------------------------------------------------
 
 def replay_action_sequence(
@@ -143,7 +157,6 @@ def replay_action_sequence(
     for k, (s_idx, a_idx) in enumerate(actions):
         s_idx_next, a_idx_next = actions[k + 1] if k + 1 < n_macro else (None, None)
 
-        # --- macro step --------------------------------------------------------
         veh_arc.step((s_idx, a_idx))
         x_a, y_a, yaw_a = veh_arc.get_pose_center()
         traj_arc.append((x_a, y_a, yaw_a))
@@ -151,7 +164,6 @@ def replay_action_sequence(
             print(f"[ARC ] step {k:03d} act=({s_idx},{a_idx})"
                   f" pose=({x_a:+7.2f},{y_a:+7.2f},{math.degrees(yaw_a):+5.1f}°)")
 
-        # --- micro steps -------------------------------------------------------
         cmds = _arc_to_cont_cmds(veh_inc, s_idx, a_idx, s_idx_next, a_idx_next)
         for j, (d_steer, acc) in enumerate(cmds):
             veh_inc.step((d_steer, acc))
@@ -164,7 +176,7 @@ def replay_action_sequence(
     return np.asarray(traj_arc), np.asarray(traj_cont)
 
 # -----------------------------------------------------------------------------
-# Plotting helper – unchanged from previous version
+# Plotting helper (unchanged)
 # -----------------------------------------------------------------------------
 
 def plot_two_trajs(
@@ -220,13 +232,12 @@ def plot_two_trajs(
     plt.show(block=True)
 
 # -----------------------------------------------------------------------------
-# Demo driver (unchanged CLI, just uses new logic)
+# Demo driver
 # -----------------------------------------------------------------------------
 
 def _demo(n_steps: int, dt: float, verbose: bool):
     rng = random.Random(0)
-    actions = [(rng.randrange(len(STEER_CHOICES)), rng.randrange(len(ARC_CHOICES)))
-               for _ in range(n_steps)]
+    actions = _generate_random_actions(n_steps, rng)
     ta, tc = replay_action_sequence(actions, dt=dt, verbose=verbose)
     plot_two_trajs(ta, tc, title=f"Random {n_steps} steps (dt={dt}s)")
 

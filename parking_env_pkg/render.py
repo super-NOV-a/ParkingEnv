@@ -10,7 +10,7 @@ Vector = Tuple[float, float]
 class PygameRenderer:
     """只做一件事：把传入的几何信息画到 Pygame 屏幕。"""
 
-    def __init__(self, screen_size=(800, 800), scale=10):
+    def __init__(self, screen_size=(800, 800), scale=20):
         self.screen_size = screen_size
         self.scale = scale
         self.screen = None

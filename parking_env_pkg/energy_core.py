@@ -38,7 +38,7 @@ def parking_energy(x, y, yaw, cx, cy, cyaw):
 
     R1 = rou / 2 * np.sin(delta_theta / 2)
     R2 = rou / 2 * np.sin(theta_l)
-    R_difference = (R1**2 + R2**2) - R_min**2
+    R_difference = (R1**2 + R2**2) / R_min**2
 
     k = 20
     energy_difference = c2 / (1 + driving_distance) * (1 / (1 + np.exp(-k * (R_difference - 1)))) * np.cos(delta_theta)

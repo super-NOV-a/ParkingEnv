@@ -19,7 +19,7 @@ class RadarConvFusion(BaseFeaturesExtractor):
     def __init__(self, observation_space, features_dim=128):
         super().__init__(observation_space, features_dim)
         obs_dim = observation_space.shape[0]
-        assert obs_dim == 81, "Expected 72 lidar + 7 state inputs + 2 last action"
+        assert obs_dim == 83, "Expected 72 lidar + 7 state inputs + 2 last action + 2 direction_info"
 
         # 雷达数据用 circular padding 卷积处理
         self.radar_conv = nn.Sequential(

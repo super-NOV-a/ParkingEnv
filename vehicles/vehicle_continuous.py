@@ -29,6 +29,10 @@ if USING_NUMBA:
         return np.array([x, y, yaw, v, steer], dtype=np.float32)
 
 class VehicleContinuous(VehicleBase):
+    """
+    直接给出偏转角和加速度
+    """
+    N_STEER = 1        # 供 _encode_prev_action 判别“连续车辆”
     def step(self, action):
         steer_cmd, acc_cmd = float(action[0]), float(action[1])
         if USING_NUMBA:
@@ -38,7 +42,13 @@ class VehicleContinuous(VehicleBase):
             )
         else:
             self._python_step(steer_cmd, acc_cmd)
-        self.direction = 1 if self.state[3] >= 0 else -1
+        # ---- 方向 / 换挡 -------------------------------------------------
+        new_dir = 1 if self.state[3] >= 0 else -1
+        if self._last_direction is not None and new_dir != self._last_direction:
+            self.switch_count += 1
+        self._last_direction = new_dir
+        self.direction = new_dir
+        
         self._update_geom_cache()
         return self.state, self.direction
 
