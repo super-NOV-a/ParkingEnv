@@ -347,12 +347,15 @@ class ParkingEnv(gym.Env):
         self._phi_prev = phi           # 更新缓存
 
         # ---------- 终止情况 -----------------------------------------------
-        if collision or trunc:
-            return -0.3                                     # 直接 0
+        if collision:
+            return -1.0    # 强惩罚
+        if trunc:
+            return -0.1    # 稍弱惩罚（训练不足也可能导致超时）
+
 
         if terminated:                                     # 成功
-            switch_cnt = max(0, getattr(self, "switch_cnt", 0)-2)   # 小于等于两次不扣
-            success_reward = max(0.3, 1.0 - 0.1 * switch_cnt) * (1 + 0.1 * self.level)
+            switch_cnt = max(0, self.vehicle.switch_count - 2)   # 小于等于两次不扣
+            success_reward = max(0.3, 1.0 - 0.1 * switch_cnt) * (1 + 0.1 * self.level) + r_shape
             return success_reward
 
         # ---------- 普通步 --------------------------------------------------
@@ -368,19 +371,17 @@ class ParkingEnv(gym.Env):
         dy = self.target_rear[1] - y
         dist = math.hypot(dx, dy)
 
-        # ---- 距离势能 0–0.5 -------------------------------------
-        # 距离奖励曲线参数
-        # _K_DIST    = 0.1       # tanh 斜率，10m->0.18 50m->0.003
-        phi_dist = 0.01 * (-dist + 50)
+        # 距离势能：φ_dist ∈ [0, 0.5]
+        phi_dist = 0.5 * math.exp(-0.1 * dist)
 
-        # ---- 姿态势能 0–0.5（仅近距离） --------------------------
-        if dist <= 20.0:
+        # 姿态势能：φ_yaw ∈ [0, 0.5]，仅在靠近车位时生效
+        if dist <= 5.0:
             yaw_err = abs(_normalize_angle(self.target_rear[2] - yaw))
             phi_yaw = 0.5 * (1.0 - yaw_err / math.pi)
         else:
             phi_yaw = 0.0
 
-        return phi_dist + phi_yaw          # 上限 1.0
+        return phi_dist + phi_yaw
 
     def _check_termination(self):
         x, y, yaw = self.vehicle.get_pose_center()
