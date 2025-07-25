@@ -15,6 +15,7 @@ from .scenario_manager import ScenarioManager
 from .render import PygameRenderer
 from .energy_core import get_energy
 
+
 Vector = Tuple[float, float]
 
 _VEHICLE_REGISTRY = {
@@ -89,7 +90,7 @@ class ParkingEnv(gym.Env):
             range_min=0.5,
             max_range=cfg.get("lidar_max_range", 30.0),
             angle_range=360,
-            num_beams=72,
+            num_beams=cfg.get("lidar_beams", 72),
             noise=False,
             std=0.05,
             angle_std=0.5,
@@ -112,12 +113,6 @@ class ParkingEnv(gym.Env):
         cfg_defaults = dict(
             world_size=30.0,
             scenario_mode="random",
-            # min_obstacles=3,  # not used
-            # max_obstacles=8,
-            # min_obstacle_size=1.0,
-            # max_obstacle_size=10.0,
-            # row_count_range=(1, 4),
-            # ego_target_max_dist=30,
             wall_thickness=0.15
         )
         self.cfg = {**cfg_defaults, **cfg,
@@ -126,12 +121,15 @@ class ParkingEnv(gym.Env):
                     "car_length":     self.car_length,
                     "car_width":      self.car_width}
         self.scenario = ScenarioManager(self.cfg)
-        self.is_file = (self.cfg.get("scenario_mode", "random").lower() == "file")
+        self.scenario_mode = self.cfg.get("scenario_mode", "random").lower()
+        self.is_file = (self.scenario_mode == "file")
         self.renderer = PygameRenderer() if self.render_mode == "human" else None
 
         # ======================== 难度等级管理 ========================
-        self.dist_levels  = np.linspace(2.0, 0.25, 11)
-        self.angle_levels = np.radians(np.linspace(36, 3, 11))
+        self.dist_levels  = np.linspace(2.0, 1, 11)
+        self.angle_levels = np.radians(np.linspace(36, 18, 11))
+        # self.dist_levels  = np.linspace(2.0, 0.25, 11)
+        # self.angle_levels = np.radians(np.linspace(36, 3, 11))
         self.level = int(np.clip(cfg.get("difficulty_level", 0), 0, 10))
         self.success_dist  = float(self.dist_levels[self.level])
         self.success_angle = float(self.angle_levels[self.level])
@@ -189,9 +187,9 @@ class ParkingEnv(gym.Env):
  
             ego_centor_x, ego_centor_y, ego_centor_yaw = self.ego_info[:3]
             ego_rear_x, ego_rear_y = _shift_forward(ego_centor_x, ego_centor_y, ego_centor_yaw)  # 目前ego是中心点，处理成后轴中心点
-            target_centor_x, target_centor_y, target_centor_yaw = self.target_info[:3]
-            target_rear_x, target_rear_y = _shift_forward(target_centor_x, target_centor_y, target_centor_yaw)  # 目前ego是中心点，处理成后轴中心点
- 
+            # target_centor_x, target_centor_y, target_centor_yaw = self.target_info[:3]
+            # target_rear_x, target_rear_y = _shift_forward(target_centor_x, target_centor_y, target_centor_yaw)  # 目前ego是中心点，处理成后轴中心点
+            target_rear_x, target_rear_y, target_centor_yaw = self.target_rear
            
             self.energy_last = get_energy(self.energy_nodes, [ego_rear_x, ego_rear_y, ego_centor_yaw])
             self.energy_target = get_energy(self.energy_nodes, [target_rear_x, target_rear_y, target_centor_yaw])
@@ -204,12 +202,25 @@ class ParkingEnv(gym.Env):
                 self.scenario.init(seed=seed, scenario_idx=scenario_idx, current_level=self.level)
             
         self.current_scenario = scenario_idx
-        self.vehicle.reset_state(*self.ego_info)
+
+        # === 1) 车位后轴中心（仅一次，全局复用） ===
+        tx_c, ty_c, tyaw = self.target_info
+        rear_dx = -1.4     # ⇐ 你的车辆几何中心 ↔ 后轴中心平移量
+        tr_x, tr_y = _shift_forward(tx_c, ty_c, tyaw, dx=rear_dx)
+        self.target_rear = (tr_x, tr_y, tyaw)
+
+        # ego_info 仍然是几何中心 —— 先平移到后轴
+        rear_x, rear_y = _shift_forward(
+            self.ego_info[0], self.ego_info[1], self.ego_info[2]
+        )
+        self.vehicle.reset_state(rear_x, rear_y, self.ego_info[2])
         self.step_count   = 0
         self.prev_dist    = float("inf")
         self.vehicle_poly = self.vehicle.get_shapely_polygon()
         self._update_obstacle_geometries()
         self._prev_action = np.array([self.N_STEER // 2, self.N_ARC // 2], dtype=np.int32)
+        self._reset_reward_state()
+
         return self._get_observation(), {}
 
     def step(self, action):
@@ -272,10 +283,12 @@ class ParkingEnv(gym.Env):
         self._scan_radar(x, y, yaw)     ## 缓存供碰撞检测
         self._obs_buf[:self.lidar.num_beams] = self._clearance / self.lidar.max_range
 
-        dx, dy = self.target_info[0] - x, self.target_info[1] - y
+        # dx, dy = self.target_info[0] - x, self.target_info[1] - y
+        dx, dy = self.target_rear[0] - x, self.target_rear[1] - y
         dist   = math.hypot(dx, dy)
         rel_ang = _normalize_angle(math.atan2(dy, dx) - yaw)
-        heading = _normalize_angle(self.target_info[2] - yaw)
+        # heading = _normalize_angle(self.target_info[2] - yaw)
+        heading = _normalize_angle(self.target_rear[2] - yaw)
 
         heading_sin, heading_cos = math.sin(heading), math.cos(heading)
         bearing_sin, bearing_cos = math.sin(rel_ang), math.cos(rel_ang)
@@ -286,7 +299,7 @@ class ParkingEnv(gym.Env):
         self._state_buf[:] = [
             self.vehicle.state[3] / self.max_speed,     # speed
             self.vehicle.state[4] / self.max_steer,     # steer
-            min(dist, 10.0) / 10.0,                     # dist to target
+            min(dist, 30.0) / 30.0,                     # dist to target
             bearing_sin, bearing_cos,                   # relative target position sin\cos
             heading_sin, heading_cos,                   # relative target heading sin\cos
             prev_s, prev_a,                             # last_action
@@ -294,12 +307,13 @@ class ParkingEnv(gym.Env):
         ]
         self._obs_buf[self.lidar.num_beams:] = self._state_buf
         return self._obs_buf
-     
+    
     def _calc_reward(self, terminated: bool, trunc: bool, collided: bool, need_energy: bool) -> float:
+        if self.scenario_mode == "parking":
+            return self._calc_reward_parking(terminated, trunc, collided)
         if need_energy and self.is_file:
-            centor_x, centor_y, centor_yaw = self.vehicle.state[:3]
-            rear_x, rear_y = _shift_forward(centor_x, centor_y, centor_yaw)  # 目前ego是中心点，处理成后轴中心点
-            energy = get_energy(self.energy_nodes, [rear_x, rear_y, self.vehicle.state[2]])
+            rear_x, rear_y, rear_yaw = self.vehicle.state[:3]
+            energy = get_energy(self.energy_nodes, [rear_x, rear_y, rear_yaw])
             # energy_reward = (energy - self.energy_last) / (500 * 3)
             energy_reward = (energy - self.energy_last) / (self.energy_offset) / 3
             self.energy_last =  energy
@@ -318,10 +332,60 @@ class ParkingEnv(gym.Env):
         # if trunc or collided:
         #     return -0.05
         return 0.0
+    
+    def _calc_reward_parking(self, terminated: bool, trunc: bool, collision: bool) -> float:
+        """
+        • shaping 总和 ≤0.5 ： r_shape = 0.5·(φ - φ_prev)
+        • success (terminated & !collision):
+            base = max(0.2, 1 - 0.1·switch_cnt)
+        • collision → 0
+        """
+        # ---------- shaping -------------------------------------------------
+        rx, ry, ryaw = self.vehicle.state[:3]
+        phi = self._calc_shaping(rx, ry, ryaw)
+        r_shape = (phi - getattr(self, "_phi_prev", phi)) * 0.5
+        self._phi_prev = phi           # 更新缓存
+
+        # ---------- 终止情况 -----------------------------------------------
+        if collision or trunc:
+            return -0.3                                     # 直接 0
+
+        if terminated:                                     # 成功
+            switch_cnt = max(0, getattr(self, "switch_cnt", 0)-2)   # 小于等于两次不扣
+            success_reward = max(0.3, 1.0 - 0.1 * switch_cnt) * (1 + 0.1 * self.level)
+            return success_reward
+
+        # ---------- 普通步 --------------------------------------------------
+        return r_shape
+
+    def _calc_shaping(self, x: float, y: float, yaw: float) -> float:
+        """
+        φ = φ_dist + φ_yaw ∈ [0,1]
+        • φ_dist : 0.5·exp(-k·dist)          （dist=0 ⇒0.5，dist→∞ ⇒0）
+        • φ_yaw  : 距离≤8 m 时 0–0.5，yaw_err=0 ⇒0.5
+        """
+        dx = self.target_rear[0] - x
+        dy = self.target_rear[1] - y
+        dist = math.hypot(dx, dy)
+
+        # ---- 距离势能 0–0.5 -------------------------------------
+        # 距离奖励曲线参数
+        # _K_DIST    = 0.1       # tanh 斜率，10m->0.18 50m->0.003
+        phi_dist = 0.01 * (-dist + 50)
+
+        # ---- 姿态势能 0–0.5（仅近距离） --------------------------
+        if dist <= 20.0:
+            yaw_err = abs(_normalize_angle(self.target_rear[2] - yaw))
+            phi_yaw = 0.5 * (1.0 - yaw_err / math.pi)
+        else:
+            phi_yaw = 0.0
+
+        return phi_dist + phi_yaw          # 上限 1.0
 
     def _check_termination(self):
         x, y, yaw = self.vehicle.get_pose_center()
-        tx, ty, tyaw = self.target_info
+        # tx, ty, tyaw = self.target_info
+        tx, ty, tyaw = self.target_rear
 
         # ---- 成功 —— 距离 + 朝向 ----
         if math.hypot(tx - x, ty - y) < self.success_dist and \
@@ -335,8 +399,8 @@ class ParkingEnv(gym.Env):
             return True, False, True   # 碰撞不结束的话需要强制车辆移动到碰撞前才对，不然会强制一直扣分
 
         # ---- 其他失败 ----
-        if math.hypot(tx - x, ty - y) > self.cfg["world_size"]:
-            return False, True, True  # Out of bounds
+        # if math.hypot(tx - x, ty - y) > self.cfg["world_size"]:
+        #     return False, True, True  # Out of bounds 有围墙就不需要判断了
         if self.step_count >= self.max_steps:
             return False, True, False  # Timeout
         return False, False, False
@@ -431,6 +495,11 @@ class ParkingEnv(gym.Env):
         self.obstacle_geoms = []
         self.current_scenario = ""
         self.step_count       = 0
+
+    def _reset_reward_state(self):
+        """在 reset() 末尾调用，初始化势函数 φ 与已换挡次数。"""
+        rx, ry, ryaw = self.vehicle.state[:3]
+        self._phi_prev = self._calc_shaping(rx, ry, ryaw)
 
     def _update_obstacle_geometries(self):
         from shapely.geometry import Polygon, LineString, Point

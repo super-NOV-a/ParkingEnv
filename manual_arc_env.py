@@ -32,9 +32,9 @@ def make_env(render: bool):
         scenario_mode="parking",   # file random box empty  random_box  parking
         data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking",
         manual=True,
-        lidar_max_range=15.0,
-        world_size=25.0,
-        difficulty_level=10,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
+        lidar_max_range=30.0,
+        world_size=30.0,
+        difficulty_level=0,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
 
         # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
         # 不同等级之间难度差别大
@@ -107,6 +107,7 @@ def run(env: ParkingEnv, render: bool):
                 action = env.action_space.sample()
 
             obs, reward, terminated, truncated, _ = env.step(action)
+            print(f"Step Reward = {reward:.4f}")
             ep_reward += reward
 
             if terminated or truncated:
@@ -125,7 +126,7 @@ def run(env: ParkingEnv, render: bool):
                 clock.tick(30)
 
         dur = time.time() - start_t
-        print(f"Episode finished in {dur:.1f}s; Reward = {ep_reward:.2f}")
+        print(f"Episode finished in {dur:.1f}s; Reward = {ep_reward:.4f}")
 
 
 def parse_args():

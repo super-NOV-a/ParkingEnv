@@ -605,107 +605,108 @@ class ScenarioManager:
         return ego_info, target_info, obstacles
 
     def _generate_parking(self, level: int = 0):
-        """生成【两排垂直车位 + 中间行车道】泊车场景，并支持：
-        1) 车辆朝向在原本 ±y 方向基础上随机再偏转 ≤10°；
-        2) 占位障碍不仅限于矩形，可随机生成三角形 / 六边形等形状，
-            其最大外接尺寸不超过对应车位 0.9 倍。
         """
+        Block-1: 入口 (W×W)         ego spawn
+        Block-2: 障碍 (可变长度)     random obstacles
+        Block-3: 停车 (W×W)         aligned slots + target
+        """
+        # ────────── 基本尺寸 ────────────────────────────────────
+        W      = self.world_size
+        t      = max(self.wall_thickness, 0.05)
+        m      = self.margin          # margin 缩写
 
-        # ===================== 基本参数 ===============================
-        W       = self.world_size                   # 横向长度 (y 轴)
-        t       = max(self.wall_thickness, 0.05)    # 墙厚
-        margin  = self.margin                       # 边距
+        pl, pw = self.parking_length, self.parking_width
+        gap_y  = self._effective_gap(level)
 
-        pl      = self.parking_length               # 车位纵深 (x)
-        pw      = self.parking_width                # 车位横宽 (y)
+        # ────────── 区块划分 ────────────────────────────────────
+        blk1_x1 = W
+        L_obs   = (0.3 + 0.07 * level) * W        # 线性映射 0→0.3W, 10→1.0W
+        blk2_x1 = blk1_x1 + L_obs
+        blk3_x1 = blk2_x1 + W                     # Block-3 固定 W
+        L       = blk3_x1                         # 世界总长
 
-        gap_y   = self._effective_gap(level)        # 相邻车位间隔
-        occupy  = self._effective_occupy(level)     # 障碍概率
+        # ────────── 车辆起点 ────────────────────────────────────
+        spawn_x = random.uniform(m, blk1_x1 - m - 1.0)
+        spawn_y = random.uniform(m + pw, W - m - pw)
+        spawn_yaw = math.radians(random.uniform(-3*level, 3*level))
+        ego_info = (spawn_x, spawn_y, spawn_yaw)
 
-        lane_w  = self._effective_lane_width(level)                 # 行车道宽
-        rear_m  = self._effective_rear_margin(level)                # 上下留白
-        L       = 2 * pl + lane_w + rear_m                          # 纵向总宽 (x)
+        # ────────── 车位排布 ────────────────────────────────────
+        park_x   = blk3_x1 - (m + 1.5 - 0.5*level) - pl/2
+        step_y   = pw + gap_y
+        slots    = [(park_x, m + pw/2 + i*step_y)
+                    for i in range(int((W - 2*m) // step_y) + 1)]
 
-        center_x   = L / 2.0
-        left_row_x = center_x - (lane_w / 2.0 + pl / 2.0)
-        right_row_x = center_x + (lane_w / 2.0 + pl / 2.0)
+        tgt_idx  = random.randrange(len(slots))
+        tx, ty   = slots[tgt_idx]
+        target_info = (tx, ty, math.pi)           # 车头朝 -x
 
-        # ===================== 沿 y 轴排布车位 ========================
-        y0     = margin + pw / 2.0
-        y_max  = W - margin - pw / 2.0
-        step_y = pw + gap_y
-        n_rows = int((y_max - y0) // step_y) + 1
+        obstacles = []
 
-        slots = []          # (row_tag, (cx, cy))
-        for i in range(n_rows):
-            cy = y0 + i * step_y
-            slots.append(("upper", (left_row_x,  cy)))
-            slots.append(("lower", (right_row_x, cy)))
-
-        # ===================== 目标车位 ===============================
-        target_row, (tx, ty) = random.choice(slots)
-        head_out  = random.random() < 0.7                          # 70% 车头朝行车道
-        tyaw  = 0 if target_row == "upper" else math.pi
-        if not head_out:                       # 车头朝相反方向
-            tyaw += math.pi               # 反向
-        target_info = (tx, ty, tyaw)
-
-        # ===================== 障碍物（多形状） =======================
-        def gen_shape(cx, cy, yaw, depth, width):
-            """在局部坐标生成形状并旋转、平移到世界坐标"""
-            shape_type = random.choice(["rect", "triangle", "hex"])
-            dx, dy = width * 0.45, depth * 0.45  # 保证外接框 ≤ 0.9 × 车位
-            if shape_type == "rect":
-                # 仍用矩形
-                local = Polygon([(-dx, -dy), (dx, -dy), (dx, dy), (-dx, dy)])
-            elif shape_type == "triangle":
-                # 等腰三角形，底朝行车道
-                local = Polygon([(-dx, -dy), (dx, -dy), (0.0, dy)])
-            else:  # hexagon
-                pts = [(dx * math.cos(a), dy * math.sin(a))
-                    for a in [math.radians(k) for k in range(0, 360, 60)]]
-                local = Polygon(pts)
-
+        # ────────── 辅助：随机形状 ───────────────────────────────
+        def gen_poly(cx, cy, yaw, depth, width):
+            dx, dy = width * 0.45, depth * 0.45
+            shape  = random.choice(("rect", "tri", "hex"))
+            if shape == "rect":
+                local = Polygon([(-dx,-dy), (dx,-dy), (dx,dy), (-dx,dy)])
+            elif shape == "tri":
+                local = Polygon([(-dx,-dy), (dx,-dy), (0,dy)])
+            else:
+                local = Polygon([(dx*math.cos(a), dy*math.sin(a))
+                                for a in map(math.radians, range(0, 360, 60))])
             poly = affinity.rotate(local, math.degrees(yaw), origin=(0, 0))
             poly = affinity.translate(poly, xoff=cx, yoff=cy)
             return list(poly.exterior.coords)[:-1]
 
-        obstacles = []
-        for row, (sx, sy) in slots:
-            if (sx, sy) == (tx, ty):
-                continue  # 目标位留空
-            if random.random() < occupy:
-                syaw_base = -math.pi/2 if row == "upper" else math.pi/2
-                syaw      = syaw_base + math.radians(random.uniform(-10, 10))
-                obstacles.append(gen_shape(sx, sy, syaw, pl, pw))
+        # ────────── Block-3 占位车 ──────────────────────────────
+        occ_prob = self._effective_occupy(level)
+        mis_ang  = math.radians(15)
 
-        # ===================== 世界边界墙 =============================
+        for i, (sx, sy) in enumerate(slots):
+            if i == tgt_idx or random.random() >= occ_prob:
+                continue
+            syaw = math.pi/2 + random.uniform(-mis_ang, mis_ang)
+            obstacles.append(gen_poly(sx, sy, syaw, pl, pw))
+
+        # ────────── 全域障碍 (Poisson-disk) ──────────────────────
+        n_obs = 2 * min(10, round(level))         # 0‥20
+        if n_obs:
+            d_min   = pw                          # 最小中心距
+            tries   = 60 * n_obs
+            accepted = []
+            x_min   = spawn_x + m + 1.0
+            x_max   = park_x - pl/2 - m - 1.0
+            y_min, y_max = pw, W - pw
+
+            for _ in range(tries):
+                if len(accepted) >= n_obs:
+                    break
+                cx = random.uniform(x_min, x_max)
+                cy = random.uniform(y_min, y_max)
+                # 距离 & 占位判定
+                if any((cx-ax)**2 + (cy-ay)**2 < d_min**2 for ax, ay in accepted):
+                    continue
+                if any(abs(cx-px) < pl*0.8 and abs(cy-py) < pw*0.8 for px, py in slots):
+                    continue
+                if (cx-spawn_x)**2 + (cy-spawn_y)**2 < (d_min + 1.0)**2:
+                    continue
+                yaw = random.uniform(0, 2*math.pi)
+                depth = random.uniform(pw, 2*pw)
+                width = random.uniform(pw, 2*pw)
+                obstacles.append(gen_poly(cx, cy, yaw, depth, width))
+                accepted.append((cx, cy))
+
+        # ────────── 世界边墙 ────────────────────────────────────
         if t > 0.0:
-            walls = [
-                [(0,     0),  (L,     0),  (L,     t),  (0,     t)],   # 下
-                [(0,   W-t),  (L,   W-t),  (L,     W),  (0,     W)],   # 上
-                [(0,     0),  (t,     0),  (t,     W),  (0,     W)],   # 左
-                [(L-t,   0),  (L,     0),  (L,     W),  (L-t,   W)],   # 右
+            obstacles += [
+                [(0,0),   (L,0),   (L,t),   (0,t)],          # 下边
+                [(0,W-t), (L,W-t), (L,W),  (0,W)],          # 上边
+                [(0,0),   (t,0),   (t,W),  (0,W)],          # 左边
+                [(L-t,0), (L,0),   (L,W),  (L-t,W)],        # 右边
             ]
-            obstacles.extend(walls)
-
-        # ===================== 车辆初始位 =============================
-        lane_x_min = left_row_x + pl / 2.0 + 0.2
-        lane_x_max = right_row_x - pl / 2.0 - 0.2
-
-        spawn_upper = random.random() < 0.5
-        spawn_x = random.uniform(lane_x_min, lane_x_max)
-        if spawn_upper:
-            spawn_y   = min(W - margin - pw, y_max + gap_y / 2.0)
-            spawn_yaw = -math.pi/2
-        else:
-            spawn_y   = max(margin + pw, y0 - gap_y / 2.0)
-            spawn_yaw =  math.pi/2
-        spawn_yaw += math.radians(random.uniform(-level, level))         # ≤±10°
-
-        ego_info = (spawn_x, spawn_y, spawn_yaw)
 
         return ego_info, target_info, obstacles
+
 
 
 def _shift_forward(x: float, y: float, yaw: float, dx: float=1.4):

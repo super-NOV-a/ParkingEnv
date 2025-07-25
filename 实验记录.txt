@@ -63,18 +63,27 @@ arc random_box fc0	限制每次转角增量30度以内  训练情况还是很好
 ----离散弧长动作空间：{离散偏转角}{-1, -0.25, 0.25, 1}
 离散加速度动作空间：{离散偏转角}{-1,0,1}
 
-使用--arc random_box fc0--10M步作为初始模型，然后在parking上继续训练
-arc parking fc0 新的parking环境，模拟停车场，world_size变为25，radar长度为15，考虑离散弧长动作空间变得更多，使用六个弧长
+使用--arc random_box fc0--10M步作为初始模型，然后在parking上继续训练，
+第一个parking是左右两停车区域，中间是行车道，第二个parking是避障前进+泊车
+arc parking fc0 第一个parking环境，模拟停车场，world_size变为25，radar长度为15，可能过于简单，泛化性会变差
+设计parking环境，希望车辆学习到 -- 1.避开碰撞障碍、2.移动到车位附近、3.调整自身位置
+arc parking fc00  重改parking环境，前进避障后停车，也是使用课程学习，到达目标的难度放宽了--00开始的效果还不错，基本达到预期
+arc parking fc01  略微修改奖励后开始01 从fc00中断的位置继续训练的
+arc parking fc02  略微修改parking难度调节：障碍数量、位置、泊车空间，从fc01中途开始训练
+fc00及以后的模型使用的场景是长parking level0和level10是一个长度，但是easy是从短到长的
+修改parking奖励设计，修改模型网络结构，现在可以选择mlp、cnn、rnn总共四种网络，暂时还没有实验，理论上现在的代码支持四种结构
+arc parking fc_easy  想先训练一个能自己走到目标前并且调整车头，倒车入库的模型。-目前4M步后刚到达level 10难度就降下来了
+
+fc_easy_rnn_1  	设置n_steps为32，训练收敛缓慢，且看运行fps低于170
+fc_easy_rnn	设置n_steps为2048，与mlp保持一致，看它在相同步数内的效果
 
 
 ----接下来看一下Q-chunking
 
 限制RL策略更新时靠近行为策略，不过此处的行为策略是从Data中用flow-matching训练的行为策略（flow policy）
 从行为策略中采样N个中最大Q值的动作
-
 限制转向增量应该能实现一个比较合理的离散动作分解--todo
-
-首先实现离散弧长的动作分解
+====此处需要反驳一下做动作分块的理由，离散弧长已经是一个连续轨迹，没必要从离散弧长分解再做动作分块了
 
 --课程学习的调整内容--
 empty：

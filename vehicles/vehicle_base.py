@@ -20,7 +20,7 @@ class VehicleBase:
         self.switch_count = 0   # 用于vehicle_arc.py 计算运动方向切换次数
         self._last_direction = None  # 初始化为无方向
 
-        self._geom_offset = self.wheelbase / 2 + (front_hang - rear_hang) / 2
+        self._geom_offset = 0.0
         self._geom_cache = np.zeros(3, dtype=np.float32)
 
     def reset_state(self, x: float, y: float, yaw: float):
@@ -31,10 +31,10 @@ class VehicleBase:
         self._last_direction = None  # 初始化为无方向
 
     def _update_geom_cache(self):
-        x_r, y_r, yaw = self.state[:3]
-        off = self._geom_offset
-        c, s = math.cos(yaw), math.sin(yaw)
-        self._geom_cache[:] = (x_r + off * c, y_r + off * s, yaw)
+        # x_r, y_r, yaw = self.state[:3]
+        # off = self._geom_offset
+        # c, s = math.cos(yaw), math.sin(yaw)
+        self._geom_cache[:] = self.state[:3]
 
     def get_pose_center(self) -> Tuple[float, float, float]:
         return tuple(self._geom_cache)
@@ -42,9 +42,10 @@ class VehicleBase:
     def get_shapely_polygon(self):  # 这是耗时较多的部分
         from shapely.geometry import Polygon
         cx, cy, yaw = self.get_pose_center()
+        # 以后轴为原点重新计算 4 个角
         half_w = self.width / 2
-        l_f = self.wheelbase / 2 + self.front_hang
-        l_r = -self.wheelbase / 2 - self.rear_hang
+        l_f = self.wheelbase + self.front_hang        # 前保险杠
+        l_r = -self.rear_hang                         # 后保险杠
         loc = [(l_r, -half_w), (l_r, half_w), (l_f, half_w), (l_f, -half_w)]
         c, s = math.cos(yaw), math.sin(yaw)
         return Polygon([(lx * c - ly * s + cx, lx * s + ly * c + cy) for lx, ly in loc])

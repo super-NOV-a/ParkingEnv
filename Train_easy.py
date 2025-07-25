@@ -74,7 +74,8 @@ from stable_baselines3.common.vec_env import VecNormalize
 from stable_baselines3.common.logger import configure
 
 from parking_env_pkg import ParkingEnv  # unified env with vehicle_type param
-from custom_policy_model import RadarConvFusion, CustomMLP
+# from custom_policy_model import RadarConvFusion, CustomMLP
+from custom_policy_model import POLICY_REGISTRY, make_model  # ← unified helper
 
 class SuccessRateCallback(BaseCallback):
     """Logs average success rate and mean level to TensorBoard."""
@@ -148,7 +149,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train PPO on flexible ParkingEnv")
 
     # –– SB3 hyper‑parameters ––
-    p.add_argument("--total_timesteps", type=int, default=10_000_000)
+    p.add_argument("--total_timesteps", type=int, default=20_000_000)
     p.add_argument("--n_envs", type=int, default=8)
     p.add_argument("--learning_rate", type=float, default=3e-4)
     p.add_argument("--batch_size", type=int, default=64)
@@ -191,13 +192,14 @@ if __name__ == "__main__":
         vehicle_type="arc", # incremental  arc
         timestep=args.timestep,
         max_steps=args.max_steps,
-        render_mode=None if args.render_mode == "none" else args.render_mode,
+        render_mode= None if args.render_mode == "none" else args.render_mode,   # "human",
         scenario_mode="parking",     # file random box empty  random_box  parking
         data_dir=".\Train_data_energy\pygame_input_features_new_withinBEV_no_parallel_parking",   # ← 指向你的 .json 文件夹
         energy_data_dir=".\Train_data_energy\Energy_train",   # ← 指向你的 .json 文件夹
         max_speed=3.0,          # 在离散轨迹中用于表示映射到[-1,1]的轨迹长度
-        lidar_max_range=15.0,
-        world_size=25.0,
+        lidar_max_range=30.0,
+        lidar_beams=144,
+        world_size=30.0,
         difficulty_level=0,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
 
         # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
@@ -205,7 +207,7 @@ if __name__ == "__main__":
         gap_base = 4,       # 在random中使用的内容
         gap_step = 0.2,     # 总共十个level  gap与occupy_prob根据level在min/max之间调节
         gap_min = 2,
-        occupy_prob_base = 0,
+        occupy_prob_base = 0,   # parking中是车位附近的障碍车位概率
         occupy_prob_step = 0.05,
         occupy_prob_max = 0.5,
 
@@ -213,14 +215,16 @@ if __name__ == "__main__":
         energy=False,    # True, False
         random_file_init = False, # 导入file时ego是否随机初始位置
         # 训练模型管理项 ↓↓↓
-        logdir="fc0", # 可以此处指定log_dir！ 继续训练时会保存在此处
+        logdir="fc_easy_144", # 可以此处指定log_dir！ 继续训练时会保存在此处
 
         # 这里写好要导入的模型，然后在命令行继续训练：python Train_easy.py 即可继续训练，不需要.zip
-        model_ckpt= ".\\runs\\ppo_arc_random_box_fc0\\checkpoints\\ppo_arc_10000000_steps",  # None
+        # model_ckpt= ".\\runs\\ppo_arc_parking_fc01\\checkpoints\\ppo_arc_10000000_steps.zip",  # None
+        model_ckpt= None,
 
         # 自定义模型类型，见--custom_policy_model.py
-        policy_class="CustomMLP",  # 可选 "CustomMLP" 或 "RadarConvFusion" 有限的几个实验结果：全连接比cnn速度快 效果好
+        model_type="mlp",              # ← change to mlp / mlp_rnn / conv / conv_rnn
     )
+
     # 训练时保存模型和log的位置可以在 parking_cfg 中指定 log_dir，
     # 在命令行指定：python Train.py --logdir="runs/your_log_path"
     args.vehicle_type = parking_cfg.get("vehicle_type")
@@ -269,14 +273,12 @@ if __name__ == "__main__":
 
     device = "cuda" if (args.cuda and os.environ.get("CUDA_VISIBLE_DEVICES", "")) else "auto"
 
-    # ── Policy kwargs ─────────────────────────────────────────────────
-    policy_class_str = parking_cfg.get("policy_class", "CustomMLP") # cfg中指定模型类型
-    policy_class = globals()[policy_class_str]  # 或自定义映射表 if 安全性考虑
 
-    policy_kwargs = dict(
-        features_extractor_class=policy_class,
-        features_extractor_kwargs=dict(features_dim=128)
-    )
+    model_type = parking_cfg["model_type"]
+    algo_cls, _, _ = POLICY_REGISTRY[model_type]
+    # ── load/resume helper --------------------------------------------------
+    def load_model(path: Path):
+        return algo_cls.load(path, env=env, device=device)
 
     # ── Model (resume or fresh) ────────────────────────────────────────────────────
 
@@ -289,18 +291,18 @@ if __name__ == "__main__":
 
     if args.resume and latest_ckpt is not None:
         print(f"[Resume] Continue training from {latest_ckpt}")
-        model = PPO.load(latest_ckpt, env=env, device=device, policy_kwargs=policy_kwargs)
+        model = load_model(latest_ckpt)
         model.set_logger(configure(str(tb_dir), ["stdout", "tensorboard"]))
 
     elif args.load_model is not None:
         print(f"[Init]  Load weights from {args.load_model}")
-        model = PPO.load(args.load_model, env=env, device=device, policy_kwargs=policy_kwargs)
+        model = load_model(args.load_model)
         model.set_logger(configure(str(tb_dir), ["stdout", "tensorboard"]))
     else:
-        model = PPO(
-            policy="MlpPolicy",
+        model = make_model(
+            model_type,
+            # policy="MlpPolicy",
             env=env,
-            policy_kwargs=policy_kwargs,
             learning_rate=args.learning_rate,
             n_steps=args.n_steps,
             batch_size=args.batch_size,
