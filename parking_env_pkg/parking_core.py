@@ -126,11 +126,11 @@ class ParkingEnv(gym.Env):
         self.renderer = PygameRenderer() if self.render_mode == "human" else None
 
         # ======================== 难度等级管理 ========================
-        self.dist_levels  = np.linspace(2.0, 1, 11)
-        self.angle_levels = np.radians(np.linspace(36, 18, 11))
+        self.dist_levels  = np.linspace(2.0, 0.5, 16)
+        self.angle_levels = np.radians(np.linspace(36, 9, 16))
         # self.dist_levels  = np.linspace(2.0, 0.25, 11)
         # self.angle_levels = np.radians(np.linspace(36, 3, 11))
-        self.level = int(np.clip(cfg.get("difficulty_level", 0), 0, 10))
+        self.level = int(np.clip(cfg.get("difficulty_level", 0), 0, 15))
         self.success_dist  = float(self.dist_levels[self.level])
         self.success_angle = float(self.angle_levels[self.level])
 
@@ -251,7 +251,7 @@ class ParkingEnv(gym.Env):
         if len(self._success_history) < self._success_history.maxlen:
             return
         success_rate = sum(self._success_history) / len(self._success_history)
-        if success_rate > 0.7 and self.level < 10:
+        if success_rate > 0.7 and self.level < 15:
             self.level += 1
             self._success_history.clear()
             print(f"[Difficulty ↑] level={self.level}  success_rate={success_rate:.2%}")
@@ -350,7 +350,7 @@ class ParkingEnv(gym.Env):
         if collision:
             return -1.0    # 强惩罚
         if trunc:
-            return -0.1    # 稍弱惩罚（训练不足也可能导致超时）
+            return -0.5    # 稍弱惩罚（训练不足也可能导致超时）
 
 
         if terminated:                                     # 成功

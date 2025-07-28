@@ -620,7 +620,7 @@ class ScenarioManager:
 
         # ────────── 区块划分 ────────────────────────────────────
         blk1_x1 = W
-        L_obs   = (0.3 + 0.07 * level) * W        # 线性映射 0→0.3W, 10→1.0W
+        L_obs   = min(1, (0.3 + 0.07 * level)) * W        # 线性映射 0→0.3W, 10→1.0W
         blk2_x1 = blk1_x1 + L_obs
         blk3_x1 = blk2_x1 + W                     # Block-3 固定 W
         L       = blk3_x1                         # 世界总长
@@ -632,7 +632,7 @@ class ScenarioManager:
         ego_info = (spawn_x, spawn_y, spawn_yaw)
 
         # ────────── 车位排布 ────────────────────────────────────
-        park_x   = blk3_x1 - (m + 1.5 - 0.5*level) - pl/2
+        park_x   = blk3_x1 - (m + 1.5 - min(0.5*level, 5)) - pl/2
         step_y   = pw + gap_y
         slots    = [(park_x, m + pw/2 + i*step_y)
                     for i in range(int((W - 2*m) // step_y) + 1)]
@@ -669,7 +669,7 @@ class ScenarioManager:
             obstacles.append(gen_poly(sx, sy, syaw, pl, pw))
 
         # ────────── 全域障碍 (Poisson-disk) ──────────────────────
-        n_obs = 2 * min(10, round(level))         # 0‥20
+        n_obs = 2 * min(10, round(level))         # 0‥20。最多20个障碍 再多学不会了--！
         if n_obs:
             d_min   = pw                          # 最小中心距
             tries   = 60 * n_obs
