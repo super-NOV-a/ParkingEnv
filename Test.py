@@ -40,14 +40,18 @@ if __name__ == "__main__":
         timestep=args.timestep,
         max_steps=args.max_steps,
         render_mode=None,
-        scenario_mode="file",  # "random_box" / "box" / "file"
+        scenario_mode="parking",  # "random_box" / "box" / "file"
         data_dir="./Train_data_energy/pygame_input_features_new_withinBEV_no_parallel_parking", #"./Train_data_energy/hard",
         lidar_max_range=30.0,
+        lidar_beams=36,
         world_size=30.0,
-        difficulty_level=10,
-
-        gap_base=4, gap_step=0.2, gap_min=2,
-        occupy_prob_base=0, occupy_prob_step=0.05, occupy_prob_max=0.5,
+        difficulty_level=15,
+        gap_base = 4,       # 在random中使用的内容
+        gap_step = 0.25,     # 总共十个level  gap与occupy_prob根据level在min/max之间调节
+        gap_min = 0.3,
+        occupy_prob_base = 0.,   # parking中是车位附近的障碍车位概率
+        occupy_prob_step = 0.06,
+        occupy_prob_max = 0.9,
         wall_thickness=0.1,
         model_ckpt=args.model,
         model_type="mlp",   # 可选 "RadarConvFusion"

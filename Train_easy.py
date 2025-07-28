@@ -149,10 +149,10 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train PPO on flexible ParkingEnv")
 
     # –– SB3 hyper‑parameters ––
-    p.add_argument("--total_timesteps", type=int, default=20_000_000)
-    p.add_argument("--n_envs", type=int, default=8)
+    p.add_argument("--total_timesteps", type=int, default=30_000_000)
+    p.add_argument("--n_envs", type=int, default=16)
     p.add_argument("--learning_rate", type=float, default=3e-4)
-    p.add_argument("--batch_size", type=int, default=64)
+    p.add_argument("--batch_size", type=int, default=2048)
     p.add_argument("--n_steps", type=int, default=2048)
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae_lambda", type=float, default=0.95)
@@ -198,27 +198,27 @@ if __name__ == "__main__":
         energy_data_dir=".\Train_data_energy\Energy_train",   # ← 指向你的 .json 文件夹
         max_speed=3.0,          # 在离散轨迹中用于表示映射到[-1,1]的轨迹长度
         lidar_max_range=30.0,
-        lidar_beams=144,
+        lidar_beams=36,
         world_size=30.0,
         difficulty_level=0,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
 
         # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
         # 不同等级之间难度差别大
         gap_base = 4,       # 在random中使用的内容
-        gap_step = 0.2,     # 总共十个level  gap与occupy_prob根据level在min/max之间调节
-        gap_min = 2,
-        occupy_prob_base = 0,   # parking中是车位附近的障碍车位概率
-        occupy_prob_step = 0.05,
-        occupy_prob_max = 0.5,
+        gap_step = 0.25,     # 总共十个level  gap与occupy_prob根据level在min/max之间调节
+        gap_min = 0.3,
+        occupy_prob_base = 0.,   # parking中是车位附近的障碍车位概率
+        occupy_prob_step = 0.06,
+        occupy_prob_max = 0.9,
 
         wall_thickness=0.1,
         energy=False,    # True, False
         random_file_init = False, # 导入file时ego是否随机初始位置
         # 训练模型管理项 ↓↓↓
-        logdir="fc_easy_144", # 可以此处指定log_dir！ 继续训练时会保存在此处
+        logdir="fc_harder_big_36", # 可以此处指定log_dir！ 继续训练时会保存在此处
 
         # 这里写好要导入的模型，然后在命令行继续训练：python Train_easy.py 即可继续训练，不需要.zip
-        # model_ckpt= ".\\runs\\ppo_arc_parking_fc01\\checkpoints\\ppo_arc_10000000_steps.zip",  # None
+        # model_ckpt= "./runs/ppo_arc_parking_fc_easy_36_2/checkpoints/ppo_arc_20000000_steps.zip",  # None
         model_ckpt= None,
 
         # 自定义模型类型，见--custom_policy_model.py

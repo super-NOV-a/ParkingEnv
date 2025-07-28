@@ -45,7 +45,7 @@ class RadarConvFusion(BaseFeaturesExtractor):
 
     def __init__(self, observation_space, features_dim: int = 128):
         super().__init__(observation_space, features_dim)
-        assert observation_space.shape[0] == 83, "expect 72+11 obs"
+        # assert observation_space.shape[0] == 83, "expect 72+11 obs"
         self.radar = nn.Sequential(
             nn.Conv1d(1, 8, 5, padding=2, padding_mode="circular"),
             nn.ReLU(True),
@@ -62,8 +62,8 @@ class RadarConvFusion(BaseFeaturesExtractor):
         )
 
     def forward(self, obs):
-        lidar = obs[:, :72].unsqueeze(1)            # (B,1,72)
-        misc  = obs[:, 72:]                         # (B,11)
+        lidar = obs[:, :-11].unsqueeze(1)            # (B,1,72)
+        misc  = obs[:, -11:]                         # (B,11)
         return self.fc(torch.cat([self.radar(lidar), misc], dim=1))
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ class RadarConvExtractor(BaseFeaturesExtractor):
         )
 
     def forward(self, obs):
-        return self.fc(torch.cat([self.lidar(obs[:, :72].unsqueeze(1)), obs[:, 72:]], dim=1))
+        return self.fc(torch.cat([self.lidar(obs[:, :-11].unsqueeze(1)), obs[:, -11:]], dim=1))
 
 # ---------------------------------------------------------------------------
 # ② CustomMlpLstmPolicy  (MLP + LSTM)

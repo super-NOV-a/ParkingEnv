@@ -34,7 +34,7 @@ def make_env(render: bool):
         manual=True,
         lidar_max_range=30.0,
         world_size=30.0,
-        difficulty_level=0,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
+        difficulty_level=15,     # 修改成指定难度就可，不需要给定障碍等内容, 在parking_core中，指定了不同难度成功条件
 
         # 配置课程，scenario_manager.py中的__post_init__方法提供了默认的课程，但是训练起来较难成长
         # 不同等级之间难度差别大
