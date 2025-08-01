@@ -1,4 +1,4 @@
-from arc_segment_tracker import sample_arc, SegmentTracker, reconstruct_reference_path
+from tracker_utils import sample_arc, SegmentTracker, reconstruct_reference_path
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import List, Tuple
