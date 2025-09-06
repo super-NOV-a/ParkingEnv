@@ -40,20 +40,19 @@ python manual_arc_env.py
 
 下面展示了几个该仓库实现的的随机泊车场景
 
-<div align="center">
-<img src=gifs/ep_002.gif width=30% />
-</div>
+| 场景1                | 场景2                |
+| -------------------- | -------------------- |
+| ![](gifs/ep_000.gif) | ![](gifs/ep_001.gif) |
 
-<div align="center">
-<img src=gifs/ep_003.gif width=30% />
-</div>
-
-<div align="center">
-<img src=gifs/ep_004.gif width=30% />
-</div>
+| 场景3                | 场景4                |
+| -------------------- | -------------------- |
+| ![](gifs/ep_002.gif) | ![](gifs/ep_003.gif) |
 
 
 
-<div align="center">
-<img src=gifs/ep_005.gif width=10% />
-</div>
+
+
+
+
+
+
