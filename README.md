@@ -41,10 +41,19 @@ python manual_arc_env.py
 下面展示了几个该仓库实现的的随机泊车场景
 
 <div align="center">
-<img src=figures/random_env_example1.png width=30% />
+<img src=gifs/ep_002.gif width=30% />
 </div>
 
 <div align="center">
-<img src=figures/random_env_example3.png width=30% />
+<img src=gifs/ep_003.gif width=30% />
 </div>
 
+<div align="center">
+<img src=gifs/ep_004.gif width=30% />
+</div>
+
+
+
+<div align="center">
+<img src=gifs/ep_005.gif width=10% />
+</div>

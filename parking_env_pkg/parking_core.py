@@ -14,7 +14,7 @@ from lidar import Lidar2D
 from .scenario_manager import ScenarioManager
 from .render import PygameRenderer
 from .energy_core import get_energy
-
+from numba import njit
 
 Vector = Tuple[float, float]
 
@@ -52,7 +52,6 @@ class ParkingEnv(gym.Env):
         # ======================== 基本仿真参数 ========================
         self.dt         = cfg.get("timestep",   0.1)     # 时间步长
         self.max_steps  = cfg.get("max_steps",  500)     # 最大步数
-        self.render_mode = cfg.get("render_mode", "human")
 
         # ======================== 车辆参数配置 ========================
         self.wheelbase   = 3.0
@@ -123,11 +122,12 @@ class ParkingEnv(gym.Env):
         self.scenario = ScenarioManager(self.cfg)
         self.scenario_mode = self.cfg.get("scenario_mode", "random").lower()
         self.is_file = (self.scenario_mode == "file")
-        self.renderer = PygameRenderer() if self.render_mode == "human" else None
+        self.render_mode = self.cfg.get("render_mode", "human")
+        self.renderer = PygameRenderer() if self.render_mode in ("human", "rgb_array") else None
 
         # ======================== 难度等级管理 ========================
-        self.dist_levels  = np.linspace(2.0, 0.5, 16)
-        self.angle_levels = np.radians(np.linspace(36, 9, 16))
+        self.dist_levels  = np.linspace(2.0, 0.25, 16)
+        self.angle_levels = np.radians(np.linspace(36, 3, 16))
         # self.dist_levels  = np.linspace(2.0, 0.25, 11)
         # self.angle_levels = np.radians(np.linspace(36, 3, 11))
         self.level = int(np.clip(cfg.get("difficulty_level", 0), 0, 15))
@@ -153,6 +153,7 @@ class ParkingEnv(gym.Env):
         # self._prev_action = np.array([self.N_STEER // 2, self.N_ARC // 2], dtype=np.int32)
         # 2) _prev_action 用 float 保存
         self._prev_action = np.zeros(2, dtype=np.float32)
+        self.init_dist = None  # 初始距离（用于 shaping）
 
         # ======================== 学习/评估统计 ========================
         self._success_history = deque(maxlen=500)
@@ -342,7 +343,8 @@ class ParkingEnv(gym.Env):
         """
         # ---------- shaping -------------------------------------------------
         rx, ry, ryaw = self.vehicle.state[:3]
-        phi = self._calc_shaping(rx, ry, ryaw)
+        # phi = self._calc_shaping(rx, ry, ryaw)
+        phi = calc_shaping_numba(rx, ry, ryaw, self.target_rear[0], self.target_rear[1], self.target_rear[2], self.init_dist)
         r_shape = (phi - getattr(self, "_phi_prev", phi)) * 0.5
         self._phi_prev = phi           # 更新缓存
 
@@ -350,7 +352,7 @@ class ParkingEnv(gym.Env):
         if collision:
             return -1.0    # 强惩罚
         if trunc:
-            return -0.5    # 稍弱惩罚（训练不足也可能导致超时）
+            return -1.0    # 稍弱惩罚（训练不足也可能导致超时）
 
 
         if terminated:                                     # 成功
@@ -361,26 +363,39 @@ class ParkingEnv(gym.Env):
         # ---------- 普通步 --------------------------------------------------
         return r_shape
 
-    def _calc_shaping(self, x: float, y: float, yaw: float) -> float:
-        """
-        φ = φ_dist + φ_yaw ∈ [0,1]
-        • φ_dist : 0.5·exp(-k·dist)          （dist=0 ⇒0.5，dist→∞ ⇒0）
-        • φ_yaw  : 距离≤8 m 时 0–0.5，yaw_err=0 ⇒0.5
-        """
+    # def _calc_shaping(self, x: float, y: float, yaw: float) -> float:
+    #     """
+    #     φ = φ_dist + φ_yaw ∈ [0,1]
+    #     • φ_dist : 0.5·exp(-k·dist)          （dist=0 ⇒0.5，dist→∞ ⇒0）
+    #     • φ_yaw  : 距离≤8 m 时 0–0.5，yaw_err=0 ⇒0.5
+    #     """
+    #     dx = self.target_rear[0] - x
+    #     dy = self.target_rear[1] - y
+    #     dist = math.hypot(dx, dy)
+    #
+    #     # 距离势能：φ_dist ∈ [0, 0.5]
+    #     phi_dist = 0.5 * (1.0 - dist / self.init_dist)
+    #     # phi_dist = 0.5 * math.exp(-0.1 * dist)
+    #
+    #     # 姿态势能：φ_yaw ∈ [0, 0.5]，仅在靠近车位时生效
+    #     if dist <= 5.0:
+    #         yaw_err = abs(_normalize_angle(self.target_rear[2] - yaw))
+    #         phi_yaw = 0.5 * (1.0 - yaw_err / math.pi)
+    #     else:
+    #         phi_yaw = 0.0
+    #
+    #     return phi_dist + phi_yaw
+
+
+    # -------- φ version A: weighted sum φ = φ_dist + w(dist) * φ_yaw -------- #
+    def _calc_shaping(self,  x: float, y: float, yaw: float) -> float:
         dx = self.target_rear[0] - x
         dy = self.target_rear[1] - y
         dist = math.hypot(dx, dy)
-
-        # 距离势能：φ_dist ∈ [0, 0.5]
-        phi_dist = 0.5 * math.exp(-0.1 * dist)
-
-        # 姿态势能：φ_yaw ∈ [0, 0.5]，仅在靠近车位时生效
-        if dist <= 5.0:
-            yaw_err = abs(_normalize_angle(self.target_rear[2] - yaw))
-            phi_yaw = 0.5 * (1.0 - yaw_err / math.pi)
-        else:
-            phi_yaw = 0.0
-
+        yaw_err = abs(_normalize_angle(self.target_rear[2] - yaw))
+        phi_dist = 0.5 * (1.0 - dist / self.init_dist)
+        w = 1 / (1 + np.exp(2.0 * (dist - 5)))  # sigmoid-like decay from 5m
+        phi_yaw = 0.5 * (1.0 - yaw_err / np.pi) * w
         return phi_dist + phi_yaw
 
     def _check_termination(self):
@@ -500,7 +515,13 @@ class ParkingEnv(gym.Env):
     def _reset_reward_state(self):
         """在 reset() 末尾调用，初始化势函数 φ 与已换挡次数。"""
         rx, ry, ryaw = self.vehicle.state[:3]
-        self._phi_prev = self._calc_shaping(rx, ry, ryaw)
+        dx = self.target_rear[0] - rx
+        dy = self.target_rear[1] - ry
+        dist = math.hypot(dx, dy)
+        self.init_dist = dist
+        # self._phi_prev = self._calc_shaping(rx, ry, ryaw)
+        self._phi_prev = calc_shaping_numba(rx, ry, ryaw, self.target_rear[0], self.target_rear[1], self.target_rear[2],
+                                      self.init_dist)
 
     def _update_obstacle_geometries(self):
         from shapely.geometry import Polygon, LineString, Point
@@ -526,10 +547,10 @@ class ParkingEnv(gym.Env):
             self.renderer.render = lambda *a, **k: None
 
     def render(self):
-        if not self.renderer:  # rgb_array 模式 return raw array
+        if not self.renderer:
             return
         x, y, yaw = self.vehicle.get_pose_center()
-        self.renderer.render(
+        return self.renderer.render(  # ← 把返回帧向上传
             vehicle_poly=self.vehicle_poly,
             vehicle_state=(x, y, yaw, self.vehicle.state[3], self.vehicle.state[4]),
             target_info=self.target_info,
@@ -541,8 +562,20 @@ class ParkingEnv(gym.Env):
             scenario_name=self.current_scenario,
             parking_length=self.parking_length,
             parking_width=self.parking_width,
+            mode=self.render_mode,  # ← 关键：传递当前模式
         )
 
 def _shift_forward(x: float, y: float, yaw: float, dx: float=-1.4):
     """沿 yaw 正方向把 (x, y) 平移 dx。"""
     return x + dx * np.cos(yaw), y + dx * np.sin(yaw)
+
+@njit
+def calc_shaping_numba(x, y, yaw, target_x, target_y, target_yaw, init_dist):
+    dx = target_x - x
+    dy = target_y - y
+    dist = math.hypot(dx, dy)
+    yaw_err = abs((target_yaw - yaw + math.pi) % (2 * math.pi) - math.pi)
+    phi_dist = 0.5 * (1.0 - dist / init_dist)
+    w = 1.0 / (1.0 + math.exp(2.0 * (dist - 5)))
+    phi_yaw = 0.5 * (1.0 - yaw_err / math.pi) * w
+    return phi_dist + phi_yaw
