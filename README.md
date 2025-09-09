@@ -1,5 +1,5 @@
 # ParkingEnv
-A simple environment for Parking
+A simple Parking environment for Reinforcement Learning.
 
 ```
 ParkingEnv/
